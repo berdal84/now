@@ -3,7 +3,7 @@
     "tasks": [
         {
             "label": "bootstrap",
-            "command": "./example/bootstrap",
+            "command": "cd example && ./bootstrap",
             "type": "shell",
         }
     ]

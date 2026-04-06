@@ -8,8 +8,8 @@
             "type": "lldb",
             "request": "launch",
             "name": "run",
-            "program": "${workspaceFolder}/example/now",
-            "args": ["build"],
+            "program": "${workspaceFolder}/example/app",
+            "args": ["run"],
             "cwd": "${workspaceFolder}/example",
             "preLaunchTask": "bootstrap"
         },

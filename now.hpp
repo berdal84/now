@@ -67,24 +67,33 @@ namespace now
 
 struct String
 {
-    static constexpr size_t npos = (size_t)-1;
+    static constexpr size_t invalid_index = (size_t)-1;
 
     size_t size;
     char*  data;
+
+    String()
+    : size(0)
+    , data(nullptr)
+    {}
+
+    String(const char* str)
+    : size(strlen(str))
+    {
+        if (size)
+            data = const_cast<char*>(str);
+        else
+            data = nullptr;
+    }
 
     String(size_t _size, char* _data)
     : size(_size)
     , data(_data)
     {}
 
-    String(const std::string& str)
+    explicit String(const std::string& str)
     : size(str.size())
     , data(const_cast<char*>(str.data()))
-    {}
-
-    String(const char* str)
-    : size(strlen(str))
-    , data(const_cast<char*>(str))
     {}
 
     char operator[](size_t pos)
@@ -93,31 +102,31 @@ struct String
     size_t rfind(char c)
     {
         size_t pos = size-1;
-        while ( pos != String::npos && data[pos] != c)
+        while ( pos != String::invalid_index && data[pos] != c)
         {
             --pos;
         }
         return pos;
     }
 
-    String lsplit(size_t pos)
+    String lsplit(size_t index)
     {
-        assert(pos < size && "Out of bounds");
-        return String{ pos - size, data };
+        assert(index < size && "Out of bounds");
+        return String{ index, data };
     }
 
-    String rsplit(size_t pos)
+    String rsplit(size_t index)
     {
-        assert(pos < size && "Out of bounds");
-        return String{ size - pos, data + pos };
+        assert(index < size && "Out of bounds");
+        return String{ size - index, data + index };
     }
 
     String stem()
     {
-        size_t pos = rfind('.');
-        if( pos == npos )
+        size_t index = rfind('.');
+        if( index == invalid_index )
             return *this;
-        return lsplit(pos);
+        return lsplit(index);
     }
 };
 
@@ -131,7 +140,7 @@ struct StringBuilder
 
     void append(const char* str)
     {
-        data.push_back({str});
+        append(String{str});
     }
 
     void append(String str)
@@ -139,27 +148,27 @@ struct StringBuilder
         data.push_back(str);
     }
     
-    StringBuilder& join(const char* sep = "")
+    StringBuilder& join(String separator = "")
     {
         result.resize(0);
         result.reserve(256);
         for(auto it = data.begin(); it != data.end(); ++it)
         {
             if (it != data.begin())
-                result += sep;
+                result.append(separator.data, separator.size);
             result.append(it->data, it->size);
         }
         return *this;
     }
 
-    const char* join_to_temp_cmd(const char* sep = " ")
+    const char* join_to_temp_cmd(String separator = " ")
     {
-        return join(sep).result.c_str();
+        return join(separator).result.c_str();
     }
 
-    const char* join_to_temp_cstr(const char* sep = "")
+    const char* join_to_temp_cstr(String separator = "")
     {
-        return join(sep).result.c_str();
+        return join(separator).result.c_str();
     }
 };
 
@@ -179,6 +188,16 @@ int system(const char* command, bool fatal = true)
     return code;
 }
 
+void remove(const char* path)
+{
+    std::filesystem::remove(path);
+}
+
+void rename(const char* src, const char* dst)
+{
+    std::filesystem::rename(src, dst);
+}
+
 int mkdir_p(const char* path)
 {
     StringBuilder sb;
@@ -192,7 +211,7 @@ int mkdir_p(const char* path)
     return now::system( sb.join_to_temp_cmd() );
 }
 
-bool file_exists(const char* path)
+bool exists(const char* path)
 {
     return std::filesystem::exists(path);
 }
@@ -238,7 +257,7 @@ struct State
         bool operator()(const char* a, const char* b) const    { return strcmp(a, b) == 0; }
     };
 
-    const char* binary = "";
+    String binary;
     std::unordered_map<const char*, Task, StringHash, StringEqual> tasks;
 };
 
@@ -294,7 +313,7 @@ Code invoke_task(const State& state, const Task* task)
         const Task* dep_task = find_task(state, dep);
         if (!dep_task)
         {
-            if (file_exists(dep))
+            if (exists(dep))
                 continue;
                 
             LOG("-- ERR: Unable to find dependency '%s'\n", dep);
@@ -365,8 +384,7 @@ using namespace now;
 int main(int argc, char* argv[])
 {   
     State& state = get_state();
-    String program_path = argv[0];
-    state.binary = program_path.stem().data;
+    state.binary = argv[0];
 
     TASK(tasks){
         print_tasks( get_state() );
@@ -383,7 +401,7 @@ int main(int argc, char* argv[])
         return 1;
     }    
     
-    for (size_t i = 1; i <= argc; ++i)
+    for (size_t i = 1; i < argc; ++i)
     {       
         const Task* task = find_task(state, argv[i]);
 
@@ -402,6 +420,56 @@ int main(int argc, char* argv[])
     }
 
     return 0;
+}
+
+void compile_object(now::String src)
+{
+    now::StringBuilder sb;
+
+    sb.append(COMPILER);
+    sb.append(CXXFLAGS); 
+    sb.append("-c");
+    sb.append(src);
+    sb.append("-o");
+
+    now::StringBuilder sb2;
+    sb2.append(BUILD_DIR);
+    sb2.append("/");
+    sb2.append(src.stem());
+    sb2.append(".o");
+    const char* obj = sb2.join_to_temp_cstr();
+    sb.append(obj);
+
+    now::system( sb.join_to_temp_cmd() );
+}
+
+void link(const char* binary, const std::vector<const char*>& objects)
+{
+    // rename <binary> => <binary>.old
+    {
+        now::StringBuilder sb;
+        sb.append(binary);
+        sb.append(".old");
+        const char* binary_old = sb.join_to_temp_cstr();
+
+        if (now::exists(binary_old)) now::remove(binary_old);
+        if (now::exists(binary))     now::rename(binary, binary_old);
+        
+    }
+
+    now::StringBuilder sb;
+
+    sb.append(COMPILER);
+
+    for (auto each_obj : objects)
+    {
+        sb.append(each_obj);
+    }
+
+    sb.append("-o");
+    sb.append(binary);
+
+    now::system( sb.join_to_temp_cmd() );
 }
 
 } // namespace
