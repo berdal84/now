@@ -1,5 +1,4 @@
 build
 *.exe
-example/now
-example/now.ilk
-example/now.pdb
+*.ilk
+*.pdb

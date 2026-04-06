@@ -1,0 +1,67 @@
+
+#define BINARY       "app.exe"
+#define BUILD_DIR    "build"
+#define COMPILER     "clang++"
+#define CXXFLAGS     "-O0 -g --std=c++20 -Wno-braced-scalar-init" // warning: braces around scalar initializer [-Wbraced-scalar-init]
+#define NOW_IMPLEMENTATION
+#include "../now.hpp"
+#include <format>
+
+static now::Array<const char*> objects = {
+    BUILD_DIR "/main.o"
+};
+
+int main(int argc, char** argv)
+{
+    now::rebuild_it_self("task.exe", "task.cpp", {COMPILER, CXXFLAGS, "-g -O0", "task.cpp", "-o", "task.exe"});
+
+    FILETASK( BUILD_DIR "/main.o", "main.cpp")
+    {
+        if ( !now::exists(BUILD_DIR))
+        {
+            now::mkdir_p( BUILD_DIR );
+        }
+
+        for(size_t i; i < task->deps.size; ++i)
+        {
+            now::compile_object( task->deps[i] );
+        }
+    };
+
+    FILETASK(BINARY, objects )
+    {
+        now::link( BINARY, objects);
+    };
+
+    TASK(build, { BINARY })
+    {
+    };
+
+    TASK(run, {build})
+    {
+        now::system("./" BINARY);
+    };
+
+    TASK(clean)
+    {
+        now::system("rm -rf " BUILD_DIR);
+    };
+
+    TASK(clobber, {clean})
+    {
+        now::system("rm " BINARY);
+    };
+
+    TASK(rebuild, {clean, build})
+    {
+    };
+
+    TASK(all, {build, run})
+    {
+    };
+
+    now::init();
+    now::parse_args(argc, argv);
+
+    return 0;
+}

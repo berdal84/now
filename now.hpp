@@ -13,6 +13,7 @@
 #include <stdarg.h>
 #include <cstdlib>
 #include <filesystem> // for filesystem::exists
+#include <iostream>
 
 //-----------------------------------------------------------------------------
 // MACROS
@@ -26,21 +27,13 @@
 #   define LOG_DEBUG(FMT, ...)
 #endif
 
-#define REBUILD_ON_CHANGE( COMMAND )\
-if( now::system( COMMAND ) )\
-{\
-    LOG("Unable to rebuild ");\
-}\
-LOG("Rebuilt %s\n", NOW_PROGRAM);
-
-// Helper to define a task (globally scoped)
 #define TASK( TASK_NAME, ...) \
     static const char* TASK_NAME = #TASK_NAME; \
     now::new_task( \
         now::get_state(), \
-        now::Task::Type_TASK,\
+        now::Task::Type_REGULAR,\
         #TASK_NAME, \
-        {__VA_ARGS__}\
+        {__VA_ARGS__} \
     )->action = [](const now::Task* task) -> void
 
 #define FILETASK( FILE_NAME, ...) \
@@ -48,15 +41,8 @@ LOG("Rebuilt %s\n", NOW_PROGRAM);
         now::get_state(), \
         now::Task::Type_FILE,\
         FILE_NAME, \
-        {__VA_ARGS__}\
+        {__VA_ARGS__} \
     )->action = [](const now::Task* task) -> void
-
-#define NOW_STATIC_INITIALIZER \
-    auto now_static_initializer = []() -> int {
-
-#define NOW_STATIC_INITIALIZER_END \
-        return 1; \
-    }();
 
 //-----------------------------------------------------------------------------
 // API
@@ -64,115 +50,281 @@ LOG("Rebuilt %s\n", NOW_PROGRAM);
 
 namespace now
 {
-
-struct String
-{
-    static constexpr size_t invalid_index = (size_t)-1;
-
-    size_t size;
-    char*  data;
-
-    String()
-    : size(0)
-    , data(nullptr)
-    {}
-
-    String(const char* str)
-    : size(strlen(str))
+    struct String
     {
-        if (size)
-            data = const_cast<char*>(str);
-        else
+        static constexpr size_t invalid_index = (size_t)-1;
+
+        size_t size;
+        char*  data;
+
+        String()
+        : size(0)
+        , data(nullptr)
+        {}
+
+        String(const char* str)
+        : size(strlen(str))
+        {
+            if (size)
+                data = const_cast<char*>(str);
+            else
+                data = nullptr;
+        }
+
+        String(size_t _size, char* _data)
+        : size(_size)
+        , data(_data)
+        {}
+
+        explicit String(const std::string& str)
+        : size(str.size())
+        , data(const_cast<char*>(str.data()))
+        {}
+
+        void init(size_t _size)
+        {
+            assert(data == nullptr);
+            size = _size;
+            data = new char[_size+1]; // +1 for null terminator to be cstr compatible
+            std::memset(data, 0, _size+1);
+        }
+
+        void free()
+        {
+            delete[] data;
             data = nullptr;
-    }
-
-    String(size_t _size, char* _data)
-    : size(_size)
-    , data(_data)
-    {}
-
-    explicit String(const std::string& str)
-    : size(str.size())
-    , data(const_cast<char*>(str.data()))
-    {}
-
-    char operator[](size_t pos)
-    { assert(pos < size && "out of bounds"); return data[pos]; }
-
-    size_t rfind(char c)
-    {
-        size_t pos = size-1;
-        while ( pos != String::invalid_index && data[pos] != c)
-        {
-            --pos;
         }
-        return pos;
-    }
 
-    String lsplit(size_t index)
+        char operator[](size_t pos)
+        { assert(pos < size && "out of bounds"); return data[pos]; }
+
+        size_t rfind(char c)
+        {
+            size_t pos = size-1;
+            while ( pos != String::invalid_index && data[pos] != c)
+            {
+                --pos;
+            }
+            return pos;
+        }
+
+        String lsplit(size_t index)
+        {
+            assert(index < size && "Out of bounds");
+            return String{ index, data };
+        }
+
+        String rsplit(size_t index)
+        {
+            assert(index < size && "Out of bounds");
+            return String{ size - index, data + index };
+        }
+
+        String stem()
+        {
+            size_t index = rfind('.');
+            if( index == invalid_index )
+                return *this;
+            return lsplit(index);
+        }
+
+        const char* c_str() const
+        { return data; /* on init, we reserve an extra char for a '\0' to be C-string compatible */}
+    };
+
+    template<typename T>
+    struct Array
     {
-        assert(index < size && "Out of bounds");
-        return String{ index, data };
-    }
+        static constexpr size_t invalid_index = (size_t)-1;
+        size_t size     = 0;
+        T*     data     = nullptr;
+        size_t capacity = 0;
+        
+        Array() = default;
 
-    String rsplit(size_t index)
+        Array(std::initializer_list<T> init)
+        : size(init.size())
+        {
+            resize(init.size());
+            std::copy(init.begin(), init.end(), data);
+        }
+
+        void free()
+        {
+            delete data;
+        }
+
+        void resize(size_t new_size)
+        {
+            assert(new_size >= size);
+
+            // ensure has capacity
+            if( new_size > capacity )
+            {
+                if( data == nullptr )
+                {
+                    data = new T[new_size];
+                }
+                else
+                {
+                    T* old_data = data;
+                    data = new T[new_size];
+                    std::memmove(old_data, data, size);
+                    delete[] old_data;
+                }
+            }
+
+            size = new_size;
+        }
+
+        void append(T str)
+        {
+            size_t index = size;
+            resize( index + 1 );
+            data[index] = str;
+        }
+
+        const T& operator[](size_t pos) const
+        { assert(pos < size && "out of bounds"); return *(data + pos); }
+
+        T& operator[](size_t pos)
+        { assert(pos < size && "out of bounds"); return *(data + pos); }
+    };
+
+    struct StringBuilder
     {
-        assert(index < size && "Out of bounds");
-        return String{ size - index, data + index };
-    }
+        Array<String> data;
+        String        temp;
+        size_t        data_size_sum = 0;
 
-    String stem()
+        StringBuilder() {}
+
+        StringBuilder& append(const char* str);
+        StringBuilder& append(String str);
+
+        template<typename T>
+        StringBuilder& append(const Array<T>& arr);
+        
+        String join(String separator = "");
+    };
+
+    void    log_message(const char *format, ...);
+    int     system(Array<const char*> command, bool fatal = true);
+    int     system(const char* command, bool fatal = true);
+    void    remove(const char* path);
+    void    rename(const char* src, const char* dst);
+    int     mkdir_p(const char* path);
+    bool    exists(const char* path);
+
+    typedef int Code;
+    enum Code_ {
+        Code_FAILED      = 0,
+        Code_OK,
+        Code_OK_SKIPPED
+    };
+
+    struct Task
     {
-        size_t index = rfind('.');
-        if( index == invalid_index )
-            return *this;
-        return lsplit(index);
-    }
-};
+        typedef int Type;
+        enum Type_ {
+            Type_NULL = 0,
+            Type_REGULAR = 1,
+            Type_FILE = 2
+        };
 
-struct StringBuilder
+        using Action = void(*)(const Task*);
+        static void null_action(const Task*) {}
+
+        mutable bool        done = false;
+        Type                type = Type_NULL;
+        const char*         name = "";
+        const char*         desc = "";
+        Array<const char*>  deps;
+        Action              action = &null_action;
+    };
+
+    struct State
+    {
+        struct StringHash
+        {
+            using is_transparent = void;
+            size_t operator()(const char* s) const   { return std::hash<std::string_view>{}(s); }
+        };
+
+        struct StringEqual
+        {
+            using is_transparent = void;
+            bool operator()(const char* a, const char* b) const    { return strcmp(a, b) == 0; }
+        };
+
+        String binary;
+        std::unordered_map<const char*, Task, StringHash, StringEqual> tasks;
+    };
+
+    static State&       get_state();
+    static Task*        new_task( State& state, Task::Type type, const char* name, Array<const char*> deps);
+    static const Task*  find_task(const State& state, const char* name);
+    static Code         invoke_task(const State& state, const Task* task);
+    static void         reset_state(State& state);
+    static void         print_tasks(State& state);
+    static void         print_help(State& state);
+    static Code         task_invoke_sequence(const State& state, const std::vector<Task*>& tasks);
+    static int          parse_args(int argc, char* argv[]);
+    static void         compile_object(now::String src);
+    static void         link(const char* binary, now::Array<const char*>& objects);
+    static void         init();
+    static void         rebuild_it_self(const char* bin, const char* src, Array<const char*> build_command);
+}
+
+#ifdef NOW_IMPLEMENTATION
+
+now::StringBuilder& now::StringBuilder::append(const char* str)
 {
-    std::vector<String> data;
-    std::string         result;
+    append(String{str});
+    return *this;
+}
 
-    StringBuilder()
-    {}
+now::StringBuilder& now::StringBuilder::append(String str)
+{
+    data.append(str);
+    data_size_sum += str.size;
+    return *this;
+}
 
-    void append(const char* str)
+template<typename T>
+now::StringBuilder& now::StringBuilder::append(const Array<T>& arr)
+{
+    for(size_t i = 0; i < arr.size; ++i)
     {
-        append(String{str});
+        append(arr.data[i]);
     }
+    return *this;
+}
 
-    void append(String str)
+now::String now::StringBuilder::join(String separator) // c_str compatible
+{
+    size_t str_size = data_size_sum + (data.size-1) * separator.size;
+    temp.init(str_size);
+
+    char* cursor = temp.data;
+    for(size_t i = 0; i < data.size; ++i)
     {
-        data.push_back(str);
-    }
-    
-    StringBuilder& join(String separator = "")
-    {
-        result.resize(0);
-        result.reserve(256);
-        for(auto it = data.begin(); it != data.end(); ++it)
+        if ( i && separator.size )
         {
-            if (it != data.begin())
-                result.append(separator.data, separator.size);
-            result.append(it->data, it->size);
+            memcpy(cursor, separator.data, separator.size);
+            cursor += separator.size;
+            LOG("%s\n", temp.data);
         }
-        return *this;
+        memcpy(cursor, data[i].data, data[i].size);
+        cursor += data[i].size;
+        LOG("%s\n", temp.data);
     }
+    temp.data[temp.size] = '\0';
+    LOG("%s\n", temp.data);
+    return temp;
+}
 
-    const char* join_to_temp_cmd(String separator = " ")
-    {
-        return join(separator).result.c_str();
-    }
-
-    const char* join_to_temp_cstr(String separator = "")
-    {
-        return join(separator).result.c_str();
-    }
-};
-
-void log_message(const char *format, ...)
+void now::log_message(const char *format, ...)
 {
   va_list args;
   va_start(args, format);
@@ -180,7 +332,20 @@ void log_message(const char *format, ...)
   va_end(args);
 }
 
-int system(const char* command, bool fatal = true)
+int now::system(Array<const char*> command, bool fatal)
+{
+    StringBuilder sb;
+    String command_str = sb.append(command).join();
+
+    int code = std::system(command_str.c_str());
+    if (code && fatal) LOG("-- ERR: Unable to run: %s\n", command_str.c_str());
+
+    command_str.free();
+    
+    return code;
+}
+
+int now::system(const char* command, bool fatal)
 {
     LOG("%s\n", command);
     int code = std::system(command);
@@ -188,17 +353,17 @@ int system(const char* command, bool fatal = true)
     return code;
 }
 
-void remove(const char* path)
+void now::remove(const char* path)
 {
     std::filesystem::remove(path);
 }
 
-void rename(const char* src, const char* dst)
+void now::rename(const char* src, const char* dst)
 {
     std::filesystem::rename(src, dst);
 }
 
-int mkdir_p(const char* path)
+int now::mkdir_p(const char* path)
 {
     StringBuilder sb;
     sb.append("mkdir");
@@ -208,70 +373,28 @@ int mkdir_p(const char* path)
 #endif
 
     sb.append(path);
-    return now::system( sb.join_to_temp_cmd() );
+    String cmd = sb.join();
+    int code = now::system( cmd.data );
+    return code;
 }
 
-bool exists(const char* path)
+bool now::exists(const char* path)
 {
     return std::filesystem::exists(path);
 }
 
-typedef int Code;
-enum Code_ {
-    Code_FAILED      = 0,
-    Code_OK,
-    Code_OK_SKIPPED
-};
 
-struct Task
+now::State& now::get_state()
 {
-    typedef int Type;
-    enum Type_ {
-        Type_NULL = 0,
-        Type_TASK = 1,
-        Type_FILE = 2
-    };
-
-    using Action = void(*)(const Task*);
-    static void null_action(const Task*) {}
-
-    mutable bool                done = false;
-    Type                        type = Type_NULL;
-    const char*                 name = "";
-    const char*                 desc = "";
-    std::vector<const char*>    deps;
-    Action                      action = &null_action;
-};
-
-struct State
-{
-    struct StringHash
-    {
-        using is_transparent = void;
-        size_t operator()(const char* s) const   { return std::hash<std::string_view>{}(s); }
-    };
-
-    struct StringEqual
-    {
-        using is_transparent = void;
-        bool operator()(const char* a, const char* b) const    { return strcmp(a, b) == 0; }
-    };
-
-    String binary;
-    std::unordered_map<const char*, Task, StringHash, StringEqual> tasks;
-};
-
-static State& get_state()
-{
-    static State s_state;
+    static now::State s_state;
     return s_state;
 }
 
-Task* new_task(
-        State&      state,
-        Task::Type  type,
-        const char* name, 
-        const std::vector<const char*>& deps)
+now::Task* now::new_task(
+        State&              state,
+        Task::Type          type,
+        const char*         name, 
+        Array<const char*>  deps)
     {
         
     Task& task = state.tasks[name];
@@ -283,7 +406,7 @@ Task* new_task(
     return &task;
 }
 
-const Task* find_task(const State& state, const char* name)
+const now::Task* now::find_task(const State& state, const char* name)
 {
     // Search existing task
     auto it = state.tasks.find(name);
@@ -293,7 +416,7 @@ const Task* find_task(const State& state, const char* name)
     return nullptr;
 }
 
-Code invoke_task(const State& state, const Task* task)
+now::Code now::invoke_task(const State& state, const Task* task)
 {
     assert(task != nullptr && "Undefined task!");
 
@@ -308,8 +431,9 @@ Code invoke_task(const State& state, const Task* task)
     LOG_DEBUG("-- Invoke task %s\n", task->name);
 
     // dependencies
-    for (const char* dep : task->deps)
+    for (size_t i = 0; i < task->deps.size; ++i)
     {       
+        const char* dep = task->deps[i];
         const Task* dep_task = find_task(state, dep);
         if (!dep_task)
         {
@@ -337,7 +461,7 @@ Code invoke_task(const State& state, const Task* task)
     return Code_OK;
 }
 
-void reset_state(State& state)
+void now::reset_state(State& state)
 {
     for (auto& [_, task] : state.tasks)
     {
@@ -345,14 +469,14 @@ void reset_state(State& state)
     }
 }
 
-void print_tasks(State& state)
+void now::print_tasks(State& state)
 {
     LOG("Tasks:\n");
 
     for (const auto& [name, task] : state.tasks)
     {
         LOG("\t%s", name, 20);
-        if (!task.deps.empty())
+        if ( task.deps.size )
         {
             LOG(": %s", task.desc );
         }
@@ -360,17 +484,17 @@ void print_tasks(State& state)
     }
 }
 
-void print_help(State& state)
+void now::print_help(now::State& state)
 {
     LOG("Usage: %s <task> [<task2>, ...]\n\n", state.binary);
-    print_tasks( state );
+    now::print_tasks( state );
 }
 
-inline Code task_invoke_sequence(const State& state, const std::vector<Task*>& tasks)
+now::Code now::task_invoke_sequence(const State& state, const std::vector<Task*>& tasks)
 {
     for (Task* task : tasks)
     {       
-        if ( invoke_task(state, task) == Code_FAILED)
+        if ( now::invoke_task(state, task) == Code_FAILED)
         {
             return Code_FAILED;
         }
@@ -379,20 +503,10 @@ inline Code task_invoke_sequence(const State& state, const std::vector<Task*>& t
     return Code_OK;
 }
 
-using namespace now;
-
-int main(int argc, char* argv[])
+int now::parse_args(int argc, char* argv[])
 {   
-    State& state = get_state();
+    State& state = now::get_state();
     state.binary = argv[0];
-
-    TASK(tasks){
-        print_tasks( get_state() );
-    };
-
-    TASK(help) {
-        print_help( get_state() );
-    };
     
     if (argc == 1)
     {
@@ -422,9 +536,9 @@ int main(int argc, char* argv[])
     return 0;
 }
 
-void compile_object(now::String src)
+void now::compile_object(String src)
 {
-    now::StringBuilder sb;
+    StringBuilder sb;
 
     sb.append(COMPILER);
     sb.append(CXXFLAGS); 
@@ -432,44 +546,74 @@ void compile_object(now::String src)
     sb.append(src);
     sb.append("-o");
 
-    now::StringBuilder sb2;
+    StringBuilder sb2;
     sb2.append(BUILD_DIR);
     sb2.append("/");
     sb2.append(src.stem());
     sb2.append(".o");
-    const char* obj = sb2.join_to_temp_cstr();
+    String obj = sb2.join();
     sb.append(obj);
 
-    now::system( sb.join_to_temp_cmd() );
+    String cmd = sb.join(" ");
+    now::system( cmd.data );
+
+    cmd.free();
+    obj.free();
 }
 
-void link(const char* binary, const std::vector<const char*>& objects)
+void now::link(const char* binary, Array<const char*>& objects)
 {
     // rename <binary> => <binary>.old
     {
-        now::StringBuilder sb;
+        StringBuilder sb;
         sb.append(binary);
         sb.append(".old");
-        const char* binary_old = sb.join_to_temp_cstr();
 
-        if (now::exists(binary_old)) now::remove(binary_old);
-        if (now::exists(binary))     now::rename(binary, binary_old);
+        String binary_old = sb.join();
+
+        if (exists(binary_old.data)) remove(binary_old.data);
+        if (exists(binary))     rename(binary, binary_old.data);
         
+        binary_old.free();
     }
 
-    now::StringBuilder sb;
+    StringBuilder sb;
 
     sb.append(COMPILER);
 
-    for (auto each_obj : objects)
+    for (size_t i = 0; i < objects.size; ++i )
     {
-        sb.append(each_obj);
+        sb.append(objects[i]);
     }
 
     sb.append("-o");
     sb.append(binary);
 
-    now::system( sb.join_to_temp_cmd() );
+    String cmd = sb.join(" ");
+    now::system( cmd.data );
+    cmd.free();
 }
 
-} // namespace
+void now::init()
+{      
+    TASK(tasks){
+        print_tasks( get_state() );
+    };
+
+    TASK(help) {
+         print_help( get_state() );
+    };
+}
+
+void now::rebuild_it_self(const char* bin, const char* src, Array<const char*> build_command)
+{   
+    bool needs_to_rebuild = std::filesystem::last_write_time(bin) < std::filesystem::last_write_time(src);
+
+    if (needs_to_rebuild)
+    {
+        now::system(build_command);
+        now::system(bin);
+    }
+}
+
+#endif

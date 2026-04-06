@@ -7,11 +7,17 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "run",
+            "name": "app",
             "program": "${workspaceFolder}/example/app",
-            "args": ["run"],
             "cwd": "${workspaceFolder}/example",
-            "preLaunchTask": "bootstrap"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "task",
+            "program": "${workspaceFolder}/example/task",
+            "args": ["help"],
+            "cwd": "${workspaceFolder}/example",
         },
     ],
     
