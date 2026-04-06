@@ -12,10 +12,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <cstdlib>
-
-#ifndef NOW_PROGRAM
-static_assert(false, "NOW_PROGRAM must be defined!");
-#endif
+#include <filesystem> // for filesystem::exists
 
 //-----------------------------------------------------------------------------
 // MACROS
@@ -23,21 +20,43 @@ static_assert(false, "NOW_PROGRAM must be defined!");
 
 #define LOG(FMT, ...) now::log_message(FMT, __VA_ARGS__ )
 
+#ifdef NOW_VERBOSE
+#   define LOG_DEBUG(FMT, ...) now::log_message("[debug] " FMT, __VA_ARGS__ )
+#else
+#   define LOG_DEBUG(FMT, ...)
+#endif
+
 #define REBUILD_ON_CHANGE( COMMAND )\
-if( now::sh( COMMAND ) )\
+if( now::system( COMMAND ) )\
 {\
     LOG("Unable to rebuild ");\
 }\
 LOG("Rebuilt %s\n", NOW_PROGRAM);
 
 // Helper to define a task (globally scoped)
-#define TASK( NAME, ...) \
-    static const char* NAME = #NAME; \
+#define TASK( TASK_NAME, ...) \
+    static const char* TASK_NAME = #TASK_NAME; \
     now::new_task( \
         now::get_state(), \
-        NAME, \
+        now::Task::Type_TASK,\
+        #TASK_NAME, \
         {__VA_ARGS__}\
-    )->action = [](const now::Task*) -> void
+    )->action = [](const now::Task* task) -> void
+
+#define FILETASK( FILE_NAME, ...) \
+    now::new_task( \
+        now::get_state(), \
+        now::Task::Type_FILE,\
+        FILE_NAME, \
+        {__VA_ARGS__}\
+    )->action = [](const now::Task* task) -> void
+
+#define NOW_STATIC_INITIALIZER \
+    auto now_static_initializer = []() -> int {
+
+#define NOW_STATIC_INITIALIZER_END \
+        return 1; \
+    }();
 
 //-----------------------------------------------------------------------------
 // API
@@ -46,37 +65,101 @@ LOG("Rebuilt %s\n", NOW_PROGRAM);
 namespace now
 {
 
+struct String
+{
+    static constexpr size_t npos = (size_t)-1;
+
+    size_t size;
+    char*  data;
+
+    String(size_t _size, char* _data)
+    : size(_size)
+    , data(_data)
+    {}
+
+    String(const std::string& str)
+    : size(str.size())
+    , data(const_cast<char*>(str.data()))
+    {}
+
+    String(const char* str)
+    : size(strlen(str))
+    , data(const_cast<char*>(str))
+    {}
+
+    char operator[](size_t pos)
+    { assert(pos < size && "out of bounds"); return data[pos]; }
+
+    size_t rfind(char c)
+    {
+        size_t pos = size-1;
+        while ( pos != String::npos && data[pos] != c)
+        {
+            --pos;
+        }
+        return pos;
+    }
+
+    String lsplit(size_t pos)
+    {
+        assert(pos < size && "Out of bounds");
+        return String{ pos - size, data };
+    }
+
+    String rsplit(size_t pos)
+    {
+        assert(pos < size && "Out of bounds");
+        return String{ size - pos, data + pos };
+    }
+
+    String stem()
+    {
+        size_t pos = rfind('.');
+        if( pos == npos )
+            return *this;
+        return lsplit(pos);
+    }
+};
+
 struct StringBuilder
 {
-    std::vector<const char*> data;
-    std::string              result;
+    std::vector<String> data;
+    std::string         result;
+
+    StringBuilder()
+    {}
 
     void append(const char* str)
+    {
+        data.push_back({str});
+    }
+
+    void append(String str)
     {
         data.push_back(str);
     }
     
-    StringBuilder& join(const char* separator = "")
+    StringBuilder& join(const char* sep = "")
     {
         result.resize(0);
         result.reserve(256);
         for(auto it = data.begin(); it != data.end(); ++it)
         {
             if (it != data.begin())
-                result += separator;
-            result += *it;
+                result += sep;
+            result.append(it->data, it->size);
         }
         return *this;
     }
 
-    StringBuilder& to_command()
+    const char* join_to_temp_cmd(const char* sep = " ")
     {
-        return join(" ");
+        return join(sep).result.c_str();
     }
 
-    const char* c_str() const
+    const char* join_to_temp_cstr(const char* sep = "")
     {
-        return result.c_str();
+        return join(sep).result.c_str();
     }
 };
 
@@ -88,10 +171,11 @@ void log_message(const char *format, ...)
   va_end(args);
 }
 
-int sh(const char* command, bool fatal = false)
+int system(const char* command, bool fatal = true)
 {
+    LOG("%s\n", command);
     int code = std::system(command);
-    if (code && fatal) LOG("Unable to run: %s\n", command);
+    if (code && fatal) LOG("-- ERR: Unable to run: %s\n", command);
     return code;
 }
 
@@ -103,8 +187,14 @@ int mkdir_p(const char* path)
 #if __unix__ or __DARWIN__
     sb.append("-p");
 #endif
+
     sb.append(path);
-    return now::sh( sb.to_command().c_str() );
+    return now::system( sb.join_to_temp_cmd() );
+}
+
+bool file_exists(const char* path)
+{
+    return std::filesystem::exists(path);
 }
 
 typedef int Code;
@@ -116,12 +206,22 @@ enum Code_ {
 
 struct Task
 {
+    typedef int Type;
+    enum Type_ {
+        Type_NULL = 0,
+        Type_TASK = 1,
+        Type_FILE = 2
+    };
+
     using Action = void(*)(const Task*);
+    static void null_action(const Task*) {}
+
     mutable bool                done = false;
-    const char*                 name;
+    Type                        type = Type_NULL;
+    const char*                 name = "";
     const char*                 desc = "";
     std::vector<const char*>    deps;
-    Action                      action = nullptr;
+    Action                      action = &null_action;
 };
 
 struct State
@@ -138,6 +238,7 @@ struct State
         bool operator()(const char* a, const char* b) const    { return strcmp(a, b) == 0; }
     };
 
+    const char* binary = "";
     std::unordered_map<const char*, Task, StringHash, StringEqual> tasks;
 };
 
@@ -148,12 +249,15 @@ static State& get_state()
 }
 
 Task* new_task(
-        State& state,
+        State&      state,
+        Task::Type  type,
         const char* name, 
         const std::vector<const char*>& deps)
     {
         
     Task& task = state.tasks[name];
+
+    task.type  = type;
     task.name  = name;
     task.deps  = deps;
 
@@ -162,8 +266,12 @@ Task* new_task(
 
 const Task* find_task(const State& state, const char* name)
 {
+    // Search existing task
     auto it = state.tasks.find(name);
-    return it != state.tasks.end() ? &it->second : nullptr;
+    if (it != state.tasks.end())
+        return &it->second;
+
+    return nullptr;
 }
 
 Code invoke_task(const State& state, const Task* task)
@@ -174,11 +282,11 @@ Code invoke_task(const State& state, const Task* task)
 
     if (task->done)
     {
-        LOG("Skipping %s ...\n", task->name);
+        LOG_DEBUG("-- Skip task %s\n", task->name);
         return Code_OK_SKIPPED;
     }
 
-    LOG("Invoking task %s ...\n", task->name);
+    LOG_DEBUG("-- Invoke task %s\n", task->name);
 
     // dependencies
     for (const char* dep : task->deps)
@@ -186,27 +294,26 @@ Code invoke_task(const State& state, const Task* task)
         const Task* dep_task = find_task(state, dep);
         if (!dep_task)
         {
-            LOG("ERR: Unable to find a task for '%s'\n", dep);
+            if (file_exists(dep))
+                continue;
+                
+            LOG("-- ERR: Unable to find dependency '%s'\n", dep);
             return Code_FAILED;
         }
-        
-        if( invoke_task(state, dep_task) == Code_FAILED)
+        else if( invoke_task(state, dep_task) == Code_FAILED )
         {
-            LOG("ERR: Dependency failed to run: '%s'\n", dep);
             return Code_FAILED;
         }
     }
     
     
-    if (task->action)
+    if (task->action != nullptr)
     {
-        LOG("Running ", task, "'s action ...");
         task->action(task);
-        LOG("Running ", task, "'s action  DONE");
     }
     
     task->done = true;
-    LOG("Invoking task %s DONE\n", task->name);
+    LOG_DEBUG("-- Invoke task %s DONE\n", task->name);
 
     return Code_OK;
 }
@@ -221,7 +328,7 @@ void reset_state(State& state)
 
 void print_tasks(State& state)
 {
-    LOG("Available tasks:\n");
+    LOG("Tasks:\n");
 
     for (const auto& [name, task] : state.tasks)
     {
@@ -236,29 +343,8 @@ void print_tasks(State& state)
 
 void print_help(State& state)
 {
-    LOG("Usage: %s <task> [<task2>, ...]\n\n", NOW_PROGRAM);
+    LOG("Usage: %s <task> [<task2>, ...]\n\n", state.binary);
     print_tasks( state );
-}
-
-inline Code state_find_and_invoke_tasks(const State& state, size_t task_count, char* task_names[])
-{
-    for (size_t i = 0; i < task_count; ++i)
-    {       
-        const char* name = task_names[i];
-        const Task* dep_task = find_task(state, name);
-        if (!dep_task)
-        {
-            LOG("ERR: Unable to find a task for '%s'\n", name);
-            return Code_FAILED;
-        }
-        
-        if( invoke_task(state, dep_task) == Code_FAILED)
-        {
-            return Code_FAILED;
-        }
-    }
-
-    return Code_OK;
 }
 
 inline Code task_invoke_sequence(const State& state, const std::vector<Task*>& tasks)
@@ -274,28 +360,46 @@ inline Code task_invoke_sequence(const State& state, const std::vector<Task*>& t
     return Code_OK;
 }
 
+using namespace now;
+
 int main(int argc, char* argv[])
 {   
-    TASK(tasks) {
-        now::print_tasks( now::get_state() );
+    State& state = get_state();
+    String program_path = argv[0];
+    state.binary = program_path.stem().data;
+
+    TASK(tasks){
+        print_tasks( get_state() );
     };
 
     TASK(help) {
-        now::print_help( now::get_state() );
+        print_help( get_state() );
     };
-
-    int task_count = argc < 2 ? 0 : argc - 1;
-
-    State& state = get_state();
-    if (task_count == 0)
+    
+    if (argc == 1)
     {
         print_help(state);
-        LOG("ERR: A task argument is expected, see messages above.");
+        LOG("\nAt least a task argument is expected.\n");
         return 1;
-    }
+    }    
+    
+    for (size_t i = 1; i <= argc; ++i)
+    {       
+        const Task* task = find_task(state, argv[i]);
 
-    char** task_vector = argv + 1;
-    state_find_and_invoke_tasks( state, task_count, task_vector );
+        if ( task == nullptr )
+        {
+            print_help(state);
+            LOG("\nUnknown task: '%s'\n", task->name);
+            return 1;
+        }
+
+        if( invoke_task(state, task) == Code_FAILED )
+        {
+            LOG("Failed to run '%s'\n", task->name);
+            return 1;
+        }
+    }
 
     return 0;
 }
