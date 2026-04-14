@@ -14,7 +14,7 @@ static now::Array<const char*> objects = {
 int main(int argc, char** argv)
 {
     // do not put code before this line, it should always be able to rebuild itself
-    now::rebuild_it_self("task.exe", "task.cpp");
+    now::rebuild_it_self_if_needed("task.exe", "task.cpp");
 
     FILETASK( BUILD_DIR "/main.o", "main.cpp")
     {

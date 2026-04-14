@@ -50,16 +50,117 @@
 
 namespace now
 {
+    struct Allocator
+    {
+        Allocator()  {}
+        ~Allocator() {}
+
+        virtual char* allocate(size_t mem_size) = 0;
+        virtual void  deallocate(void* ptr) = 0;
+        virtual char* reallocate(void* ptr, size_t size) = 0;
+    };
+
+    struct HeapAllocator : public Allocator
+    {
+        char* allocate(size_t size) override
+        { return new char[size];
+        }
+
+        void deallocate(void* ptr) override
+        { delete[] ptr; }
+    };
+
+    struct RingBuffer
+    {
+        char*  data;
+        size_t size;
+        size_t next;
+
+        RingBuffer(size_t size_in_bytes)
+        : data(nullptr)
+        , size(size_in_bytes)
+        , next(0)
+        {}
+
+        ~RingBuffer()
+        {
+            shutdown(); // We don't really need to do this, since this ring buffer should live for the entire execution of he program
+        }
+
+        void shutdown()
+        {
+            if (data)
+            {
+                default_allocator()->deallocate(data);
+                data = nullptr;
+            }
+        }
+
+        void init(size_t size_in_bytes)
+        {
+            data = default_allocator()->allocate(size_in_bytes);
+            assert(data);
+            std::memset(data, 0, size); // safer to zero-initialize
+        }
+
+        char* acquire(size_t mem_size)
+        {
+            assert(mem_size < size);
+
+            if (mem_size == 0)
+            {
+                return nullptr;
+            }
+
+            char* result = &data[next];
+            next = (next + mem_size) % size;
+            return result;
+        }
+    };
+
+    struct RingBufferAllocator : public Allocator
+    {
+        RingBuffer& buffer;
+
+        RingBufferAllocator(RingBuffer& buffer)
+        : buffer(buffer)
+        {}
+
+        ~RingBufferAllocator()
+        { /* nothing to do for a ring buffer */ }
+
+        char* allocate(size_t size) override
+        { return buffer.acquire(size); }
+
+         void deallocate(void* ptr) override
+        { /* nothing to do for a ring buffer */ }
+    };
+    
+    static Allocator* default_allocator()
+    {
+        static HeapAllocator heap_allocator;
+        return &heap_allocator;
+    }
+
+    static Allocator* temp_allocator()
+    {
+        static RingBuffer          ring_buffer{5 * 1024 * 1024};
+        static RingBufferAllocator ring_buffer_allocator{ring_buffer};
+        return &ring_buffer_allocator;
+    }
+    
     struct String
     {
         static constexpr size_t invalid_index = (size_t)-1;
 
-        size_t size;
-        char*  data;
+        size_t      size;
+        char*       data;
+        Allocator*  allocator;
 
         String()
         : size(0)
         , data(nullptr)
+        , allocator( default_allocator() )
         {}
 
         String(const char* str)
@@ -73,25 +174,27 @@ namespace now
         , data(_data)
         {}
 
-#ifdef NOW_STD_STRING
+#define NOW_STD_COMPATIBILITY
+#ifdef NOW_STD_COMPATIBILITY
         explicit String(const std::string& str)
         : size(str.size())
         , data(const_cast<char*>(str.data()))
         {}
-#endif
 
-        void init(size_t _size)
+        operator std::filesystem::path ()
+        { return { data, data+size }; }
+#endif
+        void init(size_t _size, Allocator* allocator = default_allocator())
         {
             assert(data == nullptr);
-            size = _size;
-            size_t capacity = _size+1; // +1 for null terminator to be cstr compatible
-            data = new char[capacity];
-            data[capacity-1] = 0;
+            size        = _size;
+            data        = allocator->allocate(_size);
+            allocator   = allocator;
         }
 
         void free()
         {
-            delete[] data;
+            allocator->deallocate(data);
             data = nullptr;
         }
 
@@ -128,19 +231,54 @@ namespace now
             return lsplit(index);
         }
 
-        const char* c_str() const
-        { return data; /* on init, we reserve an extra char for a '\0' to be C-string compatible */}
-    };
+        char* cstr(Allocator* allocator = temp_allocator() ) const // TODO: RingBuffer should be generic (usr virtuals or delegates)
+        {
+            size_t cstr_size = size+1;
 
+            char* ptr = nullptr;
+            if ( allocator )
+                ptr = allocator->allocate(cstr_size); // +1 for null termination
+            else
+                ptr = new char[cstr_size];
+
+            std::memcpy(ptr, data, size);
+            ptr[cstr_size-1] = 0;
+            return ptr;
+        }
+
+        static String copy(size_t source_size, char* source_data)
+        { return String::copy(String{source_size, source_data}); }
+
+        static String copy(const String source)
+        {
+            String result;
+            result.init(source.size);
+            std::memcpy(result.data, source.data, source.size);
+            return result;
+        }
+
+        static int equals(const String& a, const String& b)
+        {
+            return a.size == b.size && strncmp(a.data, b.data, a.size) == 0;
+        }
+    };
+            
     template<typename T>
     struct Array
     {
         static constexpr size_t invalid_index = (size_t)-1;
         size_t size     = 0;
         T*     data     = nullptr;
+        Allocator* allocator
         size_t capacity = 0;
         
-        Array() = default;
+        Array(Allocator* _allocator)
+        : size(0)
+        , data(nullptr)
+        , allocator(_allocator)
+        , capacity(0)
+        {
+        }
 
         Array(std::initializer_list<T> init)
         {
@@ -150,7 +288,10 @@ namespace now
 
         void free()
         {
-            delete data;
+            allocator->deallocate(data);
+            data     = nullptr;
+            size     = 0;
+            capacity = 0;
         }
 
         void resize(size_t new_size)
@@ -167,9 +308,9 @@ namespace now
                 else
                 {
                     T* old_data = data;
-                    data = new T[new_size];
+                    data = allocator->reallocate(data, new_size);
                     std::copy(old_data, old_data+size, data);
-                    delete[] old_data;
+                    allocator->deallocate(old_data, size);
                 }
             }
 
@@ -183,38 +324,44 @@ namespace now
             data[index] = str;
         }
 
+        void concat(const Array<T>& other)
+        {
+            for (size_t i = 0; i < other.size; ++i )
+            {
+                args.append(other[i]);
+            }
+        }
+
         const T& operator[](size_t pos) const
         { assert(pos < size && "out of bounds"); return *(data + pos); }
 
         T& operator[](size_t pos)
         { assert(pos < size && "out of bounds"); return *(data + pos); }
    
-        String join(const char* separator = "") const;
+        String join(const char* separator = "", Allocator* allocator = default_allocator() ) const;
     };
 
     struct StringBuilder
     {
         Array<String> data;
-        String        temp;
 
-        StringBuilder() {}
+        StringBuilder(Allocator* allocator = default_allocator())
+        : data(allocator)
+        {}
 
-        StringBuilder& append(const char* str);
-        StringBuilder& append(String str);
-
-        template<typename T>
-        StringBuilder& append(const Array<T>& arr);
-        
-        String join(String separator = "");
+        StringBuilder&  append(const char* str);
+        StringBuilder&  append(String str);
+        template<typename T>  
+        StringBuilder&  append(const Array<T>& arr);              
+        String          join(String separator = "", Allocator* allocator = default_allocator() );
     };
 
     void    log_message(const char *format, ...);
-    int     system(Array<const char*> command, bool fatal = true);
-    int     system(const char* command, bool fatal = true);
-    void    remove(const char* path);
-    void    rename(const char* src, const char* dst);
-    int     mkdir_p(const char* path);
-    bool    exists(const char* path);
+    int     system(String command, Array<String> args= {}, bool fatal = true);
+    void    remove(String path);
+    void    rename(String src, String dst);
+    int     mkdir_p(String path);
+    bool    exists(String path);
 
     typedef int Code;
     enum Code_ {
@@ -237,9 +384,9 @@ namespace now
 
         mutable bool        done = false;
         Type                type = Type_NULL;
-        const char*         name = "";
-        const char*         desc = "";
-        Array<const char*>  deps;
+        String              name = "";
+        String              desc = "";
+        Array<String>       deps;
         Action              action = &null_action;
     };
 
@@ -248,22 +395,22 @@ namespace now
         struct StringHash
         {
             using is_transparent = void;
-            size_t operator()(const char* s) const   { return std::hash<std::string_view>{}(s); }
+            size_t operator()(String s) const   { return std::hash<std::string_view>{}( s.cstr(temp_allocator())); }
         };
 
         struct StringEqual
         {
             using is_transparent = void;
-            bool operator()(const char* a, const char* b) const    { return strcmp(a, b) == 0; }
+            bool operator()(String a, String b) const { return String::equals(a,b); }
         };
 
         String binary;
-        std::unordered_map<const char*, Task, StringHash, StringEqual> tasks;
+        std::unordered_map<String, Task, StringHash, StringEqual> tasks;
     };
 
     static State&       get_state();
-    static Task*        new_task( State& state, Task::Type type, const char* name, Array<const char*> deps);
-    static const Task*  find_task(const State& state, const char* name);
+    static Task*        new_task( State& state, Task::Type type, String name, Array<String> deps);
+    static const Task*  find_task(const State& state, const String& name);
     static Code         invoke_task(const State& state, const Task* task);
     static void         reset_state(State& state);
     static void         print_tasks(State& state);
@@ -271,22 +418,22 @@ namespace now
     static Code         task_invoke_sequence(const State& state, const std::vector<Task*>& tasks);
     static int          parse_args(int argc, char* argv[]);
     static void         compile_object(now::String src);
-    static void         link(const char* binary, now::Array<const char*>& objects);
+    static void         link(String binary, Array<String>& objects);
     static void         init();
-    static void         rebuild_it_self(const char* binary, const char* source);
+    static void         rebuild_it_self_if_needed(const String& binary, const String& source);
 }
 
 #ifdef NOW_IMPLEMENTATION
 
 template <typename T>
-now::String now::Array<T>::join(const char* separator) const
+now::String now::Array<T>::join(const char* separator, Allocator* allocator) const
 {
     StringBuilder sb;
     for(size_t i = 0; i < size; i++)
     {
         sb.append( data[i] );
     }
-    return sb.join(separator);
+    return sb.join(separator, allocator);
 }
 
 now::StringBuilder& now::StringBuilder::append(const char* str)
@@ -311,18 +458,20 @@ now::StringBuilder& now::StringBuilder::append(const Array<T>& arr)
     return *this;
 }
 
-now::String now::StringBuilder::join(String separator) // c_str compatible
+now::String now::StringBuilder::join(String separator, Allocator* allocator)
 {
     // init a string to store each data with a separator
-    size_t str_size = 0;
+    size_t temp_size = 0;
     for( size_t i = 0; i < data.size; i++)
-        str_size += data[i].size;
+        temp_size += data[i].size;
     if( separator.size > 0 && data.size > 1)
-        str_size += separator.size * (data.size-1); // 1 separator after each, except last
+        temp_size += separator.size * (data.size-1); // 1 separator after each, except last
 
-    temp.init(str_size);
-
-    char* cursor = temp.data;
+    String result;
+    result.init(temp_size, allocator);
+    result.data[temp_size-1] = 0;
+    
+    char* cursor = result.data;
     for(size_t i = 0; i < data.size; ++i)
     {
         if ( i && separator.size )
@@ -336,7 +485,10 @@ now::String now::StringBuilder::join(String separator) // c_str compatible
         //LOG("%s\n", temp.data);
     }
     //LOG("%s\n", temp.data);
-    return temp;
+
+    data.free();
+
+    return result;
 }
 
 void now::log_message(const char *format, ...)
@@ -347,50 +499,40 @@ void now::log_message(const char *format, ...)
   va_end(args);
 }
 
-int now::system(Array<const char*> cmd_args, bool fatal)
+int now::system(String command, Array<String> args, bool fatal)
 {
-    String cmd_str = cmd_args.join(" ");
-    int code = now::system(cmd_str.c_str(), fatal);
-    cmd_str.free();
+    StringBuilder sb;
+    sb.append(command);
+    sb.append(args);
+    String temp_str = sb.join(" ");
+    LOG("%s\n", temp_str.cstr());
+    int code = std::system(temp_str.cstr());
+    if (code && fatal) LOG("-- ERR: Unable to run: %s\n", temp_str.cstr());
     return code;
 }
 
-int now::system(const char* command, bool fatal)
-{
-    LOG("%s\n", command);
-    int code = std::system(command);
-    if (code && fatal) LOG("-- ERR: Unable to run: %s\n", command);
-    return code;
-}
-
-void now::remove(const char* path)
+void now::remove(String path)
 {
     std::filesystem::remove(path);
 }
 
-void now::rename(const char* src, const char* dst)
+void now::rename(String src, String dst)
 {
     std::filesystem::rename(src, dst);
 }
 
-int now::mkdir_p(const char* path)
+int now::mkdir_p(String path)
 {
-    StringBuilder sb;
-    sb.append("mkdir");
-
 #if __unix__ or __DARWIN__
-    sb.append("-p");
+    return now::system( "mkdir", { "-p", path.c_str()} );
+#else
+    return now::system( "mkdir", { path.cstr() } );
 #endif
-
-    sb.append(path);
-    String cmd = sb.join();
-    int code = now::system( cmd.data );
-    return code;
 }
 
-bool now::exists(const char* path)
+bool now::exists(String path)
 {
-    return std::filesystem::exists(path);
+    return std::filesystem::exists(path.cstr());
 }
 
 
@@ -401,10 +543,10 @@ now::State& now::get_state()
 }
 
 now::Task* now::new_task(
-        State&              state,
-        Task::Type          type,
-        const char*         name, 
-        Array<const char*>  deps)
+        State&          state,
+        Task::Type      type,
+        String          name, 
+        Array<String>   deps)
     {
         
     Task& task = state.tasks[name];
@@ -416,7 +558,7 @@ now::Task* now::new_task(
     return &task;
 }
 
-const now::Task* now::find_task(const State& state, const char* name)
+const now::Task* now::find_task(const State& state, const String& name)
 {
     // Search existing task
     auto it = state.tasks.find(name);
@@ -443,7 +585,7 @@ now::Code now::invoke_task(const State& state, const Task* task)
     // dependencies
     for (size_t i = 0; i < task->deps.size; ++i)
     {       
-        const char* dep = task->deps[i];
+        String dep = task->deps[i];
         const Task* dep_task = find_task(state, dep);
         if (!dep_task)
         {
@@ -548,30 +690,12 @@ int now::parse_args(int argc, char* argv[])
 
 void now::compile_object(String src)
 {
-    StringBuilder sb;
+    Array<String> obj = { BUILD_DIR, "/", src.stem(), ".o" };
+    now::system( COMPILER, { CXXFLAGS, "-c", src.cstr(), "-o", obj.join().cstr() } );
 
-    sb.append(COMPILER);
-    sb.append(CXXFLAGS); 
-    sb.append("-c");
-    sb.append(src);
-    sb.append("-o");
-
-    StringBuilder sb2;
-    sb2.append(BUILD_DIR);
-    sb2.append("/");
-    sb2.append(src.stem());
-    sb2.append(".o");
-    String obj = sb2.join();
-    sb.append(obj);
-
-    String cmd = sb.join(" ");
-    now::system( cmd.data );
-
-    cmd.free();
-    obj.free();
 }
 
-void now::link(const char* binary, Array<const char*>& objects)
+void now::link(String binary, Array<String>& objects)
 {
     // rename <binary> => <binary>.old
     {
@@ -581,27 +705,17 @@ void now::link(const char* binary, Array<const char*>& objects)
 
         String binary_old = sb.join();
 
-        if (exists(binary_old.data)) remove(binary_old.data);
-        if (exists(binary))     rename(binary, binary_old.data);
-        
-        binary_old.free();
+        if (exists(binary_old)) remove(binary_old);
+        if (exists(binary))     rename(binary, binary_old);
     }
 
-    StringBuilder sb;
+    Array<String> args;
 
-    sb.append(COMPILER);
+    args.concat(objects);
+    args.append("-o");
+    args.append(binary);
 
-    for (size_t i = 0; i < objects.size; ++i )
-    {
-        sb.append(objects[i]);
-    }
-
-    sb.append("-o");
-    sb.append(binary);
-
-    String cmd = sb.join(" ");
-    now::system( cmd.data );
-    cmd.free();
+    now::system(COMPILER, args);
 }
 
 void now::init()
@@ -615,28 +729,83 @@ void now::init()
     };
 }
 
-void now::rebuild_it_self(const char* binary, const char* source)
+namespace now
+{
+    struct Dependencies
+    {
+        now::String target;
+        now::Array<now::String> deps;
+    };
+
+    Dependencies parse_d_file(const char *filename)
+    {
+        LOG("Parsing %s ...\n", filename);
+        Dependencies result;
+        FILE *file = fopen(filename, "r");
+        
+        if (!file)
+        {
+            LOG("ERR: fopen %s\n", filename);
+            return result;
+        }
+        
+        char* curr_line;
+        if ( fgets(curr_line, sizeof(curr_line), file))
+        {
+            // Find the colon separator
+            char *colon_ptr = strchr(curr_line, ':');
+            if ( colon_ptr == nullptr)
+            {
+                LOG("WARN: Unable to find a ':' colon!\n", filename);
+            }
+            else
+            {
+                // Extract target
+                result.target = String::copy(colon_ptr - curr_line, curr_line);
+                LOG("Target found: %s\n", result.target.cstr());
+
+                // Parse dependencies
+                char *deps_str = colon_ptr + 1;
+                char *token    = strtok(deps_str, " \t\n");
+                
+                while (token != nullptr)
+                {
+                    String dep = String::copy(token);
+                    result.deps.append( dep );
+                    LOG("Dependency #%i found: %s\n", result.deps.size, dep.cstr() );
+                    token = strtok(NULL, " \t\n");
+                }
+            }
+        }
+        
+        fclose(file);
+        return result;
+    }
+};
+
+void now::rebuild_it_self_if_needed(const String& binary, const String& source)
 {   
-    bool needs_to_rebuild = std::filesystem::last_write_time(binary) < std::filesystem::last_write_time(source);
+    bool needs_to_rebuild = std::filesystem::last_write_time(binary.cstr()) < std::filesystem::last_write_time(source.cstr()); // TODO: uses *.d files, the cpp might include dependencies that may have change.
 
     if (needs_to_rebuild)
     {
-        Array<const char*> build_command = {
-            COMPILER,
+        // Rename current binary (we can't overwrite it while running, but we can rename it)
+        StringBuilder sb;
+        sb.append(binary);
+        sb.append(".old");
+        now::rename(binary, sb.join().cstr() );
+
+        // Compiles
+        now::system(COMPILER, {
             CXXFLAGS,
             //"-g -O0",
             "task.cpp",
             "-o",
-            binary
-        };
+            binary,
+            "-MMD", "-MF", "task.d"
+        });
 
-        StringBuilder sb;
-        sb.append(binary);
-        sb.append(".old");
-        String binary_old = sb.join();
-        now::rename(binary, binary_old.c_str() );
-        binary_old.free();
-        now::system(build_command);
+        // Run again and exit (we don't want to run the tasks twice!)
         int code = now::system(binary);
         exit(code);
     }
