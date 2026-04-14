@@ -273,7 +273,7 @@ namespace now
     static void         compile_object(now::String src);
     static void         link(const char* binary, now::Array<const char*>& objects);
     static void         init();
-    static void         rebuild_it_self(const char* bin, const char* src, Array<const char*> build_command);
+    static void         rebuild_it_self(const char* binary, const char* source);
 }
 
 #ifdef NOW_IMPLEMENTATION
@@ -615,14 +615,29 @@ void now::init()
     };
 }
 
-void now::rebuild_it_self(const char* bin, const char* src, Array<const char*> build_command)
+void now::rebuild_it_self(const char* binary, const char* source)
 {   
-    bool needs_to_rebuild = std::filesystem::last_write_time(bin) < std::filesystem::last_write_time(src);
+    bool needs_to_rebuild = std::filesystem::last_write_time(binary) < std::filesystem::last_write_time(source);
 
     if (needs_to_rebuild)
     {
+        Array<const char*> build_command = {
+            COMPILER,
+            CXXFLAGS,
+            "-g -O0",
+            "task.cpp",
+            "-o",
+            binary
+        };
+
+        StringBuilder sb;
+        sb.append(binary);
+        sb.append(".old");
+        String binary_old = sb.join();
+        now::rename(binary, binary_old.c_str() );
+        binary_old.free();
         now::system(build_command);
-        int code = now::system(bin);
+        int code = now::system(binary);
         exit(code);
     }
 }

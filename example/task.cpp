@@ -13,7 +13,8 @@ static now::Array<const char*> objects = {
 
 int main(int argc, char** argv)
 {
-    now::rebuild_it_self("task.exe", "task.cpp", {COMPILER, CXXFLAGS, "-g -O0", "task.cpp", "-o", "task.exe"});
+    // do not put code before this line, it should always be able to rebuild itself
+    now::rebuild_it_self("task.exe", "task.cpp");
 
     FILETASK( BUILD_DIR "/main.o", "main.cpp")
     {
