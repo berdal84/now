@@ -2,7 +2,7 @@
 #define BINARY       "app.exe"
 #define BUILD_DIR    "build"
 #define COMPILER     "clang++"
-#define CXXFLAGS     "-O0 -g --std=c++20 -Wno-braced-scalar-init" // warning: braces around scalar initializer [-Wbraced-scalar-init]
+#define CXXFLAGS     "--std=c++20 -Wno-braced-scalar-init" // warning: braces around scalar initializer [-Wbraced-scalar-init]
 #define NOW_IMPLEMENTATION
 #include "../now.hpp"
 #include <format>

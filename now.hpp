@@ -624,7 +624,7 @@ void now::rebuild_it_self(const char* binary, const char* source)
         Array<const char*> build_command = {
             COMPILER,
             CXXFLAGS,
-            "-g -O0",
+            //"-g -O0",
             "task.cpp",
             "-o",
             binary
