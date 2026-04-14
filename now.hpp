@@ -64,11 +64,8 @@ namespace now
 
         String(const char* str)
         : size(strlen(str))
+        , data(const_cast<char*>(str))
         {
-            if (size)
-                data = const_cast<char*>(str);
-            else
-                data = nullptr;
         }
 
         String(size_t _size, char* _data)
@@ -76,17 +73,20 @@ namespace now
         , data(_data)
         {}
 
+#ifdef NOW_STD_STRING
         explicit String(const std::string& str)
         : size(str.size())
         , data(const_cast<char*>(str.data()))
         {}
+#endif
 
         void init(size_t _size)
         {
             assert(data == nullptr);
             size = _size;
-            data = new char[_size+1]; // +1 for null terminator to be cstr compatible
-            std::memset(data, 0, _size+1);
+            size_t capacity = _size+1; // +1 for null terminator to be cstr compatible
+            data = new char[capacity];
+            data[capacity-1] = 0;
         }
 
         void free()
@@ -143,7 +143,6 @@ namespace now
         Array() = default;
 
         Array(std::initializer_list<T> init)
-        : size(init.size())
         {
             resize(init.size());
             std::copy(init.begin(), init.end(), data);
@@ -169,7 +168,7 @@ namespace now
                 {
                     T* old_data = data;
                     data = new T[new_size];
-                    std::memmove(old_data, data, size);
+                    std::copy(old_data, old_data+size, data);
                     delete[] old_data;
                 }
             }
@@ -189,13 +188,14 @@ namespace now
 
         T& operator[](size_t pos)
         { assert(pos < size && "out of bounds"); return *(data + pos); }
+   
+        String join(const char* separator = "") const;
     };
 
     struct StringBuilder
     {
         Array<String> data;
         String        temp;
-        size_t        data_size_sum = 0;
 
         StringBuilder() {}
 
@@ -278,6 +278,17 @@ namespace now
 
 #ifdef NOW_IMPLEMENTATION
 
+template <typename T>
+now::String now::Array<T>::join(const char* separator) const
+{
+    StringBuilder sb;
+    for(size_t i = 0; i < size; i++)
+    {
+        sb.append( data[i] );
+    }
+    return sb.join(separator);
+}
+
 now::StringBuilder& now::StringBuilder::append(const char* str)
 {
     append(String{str});
@@ -287,7 +298,6 @@ now::StringBuilder& now::StringBuilder::append(const char* str)
 now::StringBuilder& now::StringBuilder::append(String str)
 {
     data.append(str);
-    data_size_sum += str.size;
     return *this;
 }
 
@@ -303,7 +313,13 @@ now::StringBuilder& now::StringBuilder::append(const Array<T>& arr)
 
 now::String now::StringBuilder::join(String separator) // c_str compatible
 {
-    size_t str_size = data_size_sum + (data.size-1) * separator.size;
+    // init a string to store each data with a separator
+    size_t str_size = 0;
+    for( size_t i = 0; i < data.size; i++)
+        str_size += data[i].size;
+    if( separator.size > 0 && data.size > 1)
+        str_size += separator.size * (data.size-1); // 1 separator after each, except last
+
     temp.init(str_size);
 
     char* cursor = temp.data;
@@ -313,14 +329,13 @@ now::String now::StringBuilder::join(String separator) // c_str compatible
         {
             memcpy(cursor, separator.data, separator.size);
             cursor += separator.size;
-            LOG("%s\n", temp.data);
+            //LOG("%s\n", temp.data);
         }
         memcpy(cursor, data[i].data, data[i].size);
         cursor += data[i].size;
-        LOG("%s\n", temp.data);
+        //LOG("%s\n", temp.data);
     }
-    temp.data[temp.size] = '\0';
-    LOG("%s\n", temp.data);
+    //LOG("%s\n", temp.data);
     return temp;
 }
 
@@ -332,16 +347,11 @@ void now::log_message(const char *format, ...)
   va_end(args);
 }
 
-int now::system(Array<const char*> command, bool fatal)
+int now::system(Array<const char*> cmd_args, bool fatal)
 {
-    StringBuilder sb;
-    String command_str = sb.append(command).join();
-
-    int code = std::system(command_str.c_str());
-    if (code && fatal) LOG("-- ERR: Unable to run: %s\n", command_str.c_str());
-
-    command_str.free();
-    
+    String cmd_str = cmd_args.join(" ");
+    int code = now::system(cmd_str.c_str(), fatal);
+    cmd_str.free();
     return code;
 }
 
@@ -612,7 +622,8 @@ void now::rebuild_it_self(const char* bin, const char* src, Array<const char*> b
     if (needs_to_rebuild)
     {
         now::system(build_command);
-        now::system(bin);
+        int code = now::system(bin);
+        exit(code);
     }
 }
 
