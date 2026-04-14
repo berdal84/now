@@ -55,19 +55,36 @@ namespace now
         Allocator()  {}
         ~Allocator() {}
 
-        virtual char* allocate(size_t mem_size) = 0;
+        virtual void* allocate(size_t mem_size) = 0;
         virtual void  deallocate(void* ptr) = 0;
-        virtual char* reallocate(void* ptr, size_t size) = 0;
+        virtual void* reallocate(void* ptr, size_t size) = 0;
+    };
+
+    static Allocator* default_allocator();
+    static Allocator* temp_allocator();
+
+    struct NullAllocator : public Allocator
+    {
+        void* allocate(size_t size) override
+        { return nullptr; }
+
+        void deallocate(void* ptr) override
+        {}
+
+        void* reallocate(void* ptr, size_t size) override
+        { return nullptr; }
     };
 
     struct HeapAllocator : public Allocator
     {
-        char* allocate(size_t size) override
-        { return new char[size];
-        }
+        void* allocate(size_t size) override
+        { return std::malloc(size); }
 
         void deallocate(void* ptr) override
-        { delete[] ptr; }
+        { std::free(ptr); }
+
+        void* reallocate(void* ptr, size_t size) override
+        { return std::realloc(ptr, size); }
     };
 
     struct RingBuffer
@@ -80,7 +97,9 @@ namespace now
         : data(nullptr)
         , size(size_in_bytes)
         , next(0)
-        {}
+        {
+            init(size_in_bytes);
+        }
 
         ~RingBuffer()
         {
@@ -98,13 +117,14 @@ namespace now
 
         void init(size_t size_in_bytes)
         {
-            data = default_allocator()->allocate(size_in_bytes);
+            data = static_cast<char*>(default_allocator()->allocate(size_in_bytes));
             assert(data);
             std::memset(data, 0, size); // safer to zero-initialize
         }
 
         char* acquire(size_t mem_size)
         {
+            assert(data != nullptr);
             assert(mem_size < size);
 
             if (mem_size == 0)
@@ -129,11 +149,18 @@ namespace now
         ~RingBufferAllocator()
         { /* nothing to do for a ring buffer */ }
 
-        char* allocate(size_t size) override
+        void* allocate(size_t size) override
         { return buffer.acquire(size); }
 
-         void deallocate(void* ptr) override
+        void deallocate(void* ptr) override
         { /* nothing to do for a ring buffer */ }
+
+        void* reallocate(void* existing_ptr, size_t size) override
+        {
+            // TODO: reuse existing space
+            //       We could store the latest aquired ptr, and if it existing_ptr == ptr we could simply extend
+            return buffer.acquire(size);
+        }
     };
     
     static Allocator* default_allocator()
@@ -148,7 +175,7 @@ namespace now
         static RingBufferAllocator ring_buffer_allocator{ring_buffer};
         return &ring_buffer_allocator;
     }
-    
+
     struct String
     {
         static constexpr size_t invalid_index = (size_t)-1;
@@ -157,21 +184,22 @@ namespace now
         char*       data;
         Allocator*  allocator;
 
-        String()
+        String(Allocator* _allocator = default_allocator() )
         : size(0)
         , data(nullptr)
-        , allocator( default_allocator() )
+        , allocator(_allocator)
         {}
 
-        String(const char* str)
+        String(const char* str, Allocator* _allocator = default_allocator() )
         : size(strlen(str))
         , data(const_cast<char*>(str))
-        {
-        }
+        , allocator(_allocator)
+        {}
 
-        String(size_t _size, char* _data)
+        String(size_t _size, char* _data, Allocator* _allocator = default_allocator() )
         : size(_size)
         , data(_data)
+        , allocator(_allocator)
         {}
 
 #define NOW_STD_COMPATIBILITY
@@ -188,7 +216,7 @@ namespace now
         {
             assert(data == nullptr);
             size        = _size;
-            data        = allocator->allocate(_size);
+            data        = static_cast<char*>(allocator->allocate(_size));
             allocator   = allocator;
         }
 
@@ -214,13 +242,13 @@ namespace now
         String lsplit(size_t index)
         {
             assert(index < size && "Out of bounds");
-            return String{ index, data };
+            return String{ index, data, allocator };
         }
 
         String rsplit(size_t index)
         {
             assert(index < size && "Out of bounds");
-            return String{ size - index, data + index };
+            return String{ size - index, data + index, allocator };
         }
 
         String stem()
@@ -234,13 +262,7 @@ namespace now
         char* cstr(Allocator* allocator = temp_allocator() ) const // TODO: RingBuffer should be generic (usr virtuals or delegates)
         {
             size_t cstr_size = size+1;
-
-            char* ptr = nullptr;
-            if ( allocator )
-                ptr = allocator->allocate(cstr_size); // +1 for null termination
-            else
-                ptr = new char[cstr_size];
-
+            char* ptr = static_cast<char*>( allocator->allocate(cstr_size) ); // +1 for null termination
             std::memcpy(ptr, data, size);
             ptr[cstr_size-1] = 0;
             return ptr;
@@ -267,23 +289,27 @@ namespace now
     struct Array
     {
         static constexpr size_t invalid_index = (size_t)-1;
-        size_t size     = 0;
-        T*     data     = nullptr;
-        Allocator* allocator
-        size_t capacity = 0;
+
+        size_t      size        = 0;
+        T*          data        = nullptr;
+        Allocator*  allocator   = nullptr;
+        size_t      capacity    = 0;
         
-        Array(Allocator* _allocator)
+        Array(Allocator* _allocator = default_allocator())
         : size(0)
         , data(nullptr)
         , allocator(_allocator)
         , capacity(0)
-        {
-        }
+        {}
 
-        Array(std::initializer_list<T> init)
+        Array(std::initializer_list<T> list)
+        : size(0)
+        , data(nullptr)
+        , allocator(default_allocator())
+        , capacity(0)
         {
-            resize(init.size());
-            std::copy(init.begin(), init.end(), data);
+            resize(list.size());
+            std::copy(list.begin(), list.end(), data);
         }
 
         void free()
@@ -303,14 +329,21 @@ namespace now
             {
                 if( data == nullptr )
                 {
-                    data = new T[new_size];
+                    data = static_cast<T*>(allocator->allocate(new_size));
+
+                    for( size_t i=0; i < new_size; i++)
+                        new (data+i) T(); // construct in-place
                 }
                 else
                 {
-                    T* old_data = data;
-                    data = allocator->reallocate(data, new_size);
-                    std::copy(old_data, old_data+size, data);
-                    allocator->deallocate(old_data, size);
+                    T*     old_data = data;
+                    size_t old_size = size;
+
+                    data = static_cast<T*>(allocator->reallocate(data, new_size));
+                    std::copy(old_data, old_data+old_size, data);
+
+                    for( size_t i=old_size; i < new_size; i++)
+                        new (data+i) T(); // construct in-place
                 }
             }
 
@@ -326,9 +359,11 @@ namespace now
 
         void concat(const Array<T>& other)
         {
+            size_t old_size = size;
+            resize(size + other.size);
             for (size_t i = 0; i < other.size; ++i )
             {
-                args.append(other[i]);
+                (*this)[old_size+i] = other[i];
             }
         }
 
@@ -526,7 +561,7 @@ int now::mkdir_p(String path)
 #if __unix__ or __DARWIN__
     return now::system( "mkdir", { "-p", path.c_str()} );
 #else
-    return now::system( "mkdir", { path.cstr() } );
+    return now::system( "mkdir", Array{ path } );
 #endif
 }
 
@@ -790,10 +825,8 @@ void now::rebuild_it_self_if_needed(const String& binary, const String& source)
     if (needs_to_rebuild)
     {
         // Rename current binary (we can't overwrite it while running, but we can rename it)
-        StringBuilder sb;
-        sb.append(binary);
-        sb.append(".old");
-        now::rename(binary, sb.join().cstr() );
+        const char * new_name = Array<String>{binary, ".old"}.join("", temp_allocator()).cstr();
+        now::rename(binary, new_name );
 
         // Compiles
         now::system(COMPILER, {

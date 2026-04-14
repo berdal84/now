@@ -4,12 +4,8 @@
 #define COMPILER     "clang++"
 #define CXXFLAGS     "--std=c++20 -Wno-braced-scalar-init" // warning: braces around scalar initializer [-Wbraced-scalar-init]
 #define NOW_IMPLEMENTATION
-#include "../now.hpp"
+#include "now/now.hpp"
 #include <format>
-
-static now::Array<const char*> objects = {
-    BUILD_DIR "/main.o"
-};
 
 int main(int argc, char** argv)
 {
@@ -29,6 +25,10 @@ int main(int argc, char** argv)
         }
     };
 
+    static now::Array<now::String> objects = {
+        BUILD_DIR "/main.o"
+    };
+    
     FILETASK(BINARY, objects )
     {
         now::link( BINARY, objects);
