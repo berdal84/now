@@ -4,6 +4,8 @@
 #define COMPILER     "clang++"
 #define CXXFLAGS     "--std=c++20 -Wno-braced-scalar-init" // warning: braces around scalar initializer [-Wbraced-scalar-init]
 #define NOW_IMPLEMENTATION
+#define NOW_DEBUG_MEMORY
+#define NOW_VERBOSE
 #include "now/now.hpp"
 #include <format>
 
@@ -21,7 +23,7 @@ int main(int argc, char** argv)
 
         for(size_t i; i < task->deps.size; ++i)
         {
-            now::compile_object( task->deps[i] );
+            now::compile_object( task->deps.at(i) );
         }
     };
 

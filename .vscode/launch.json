@@ -7,13 +7,6 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "app",
-            "program": "${workspaceFolder}/app",
-            "cwd": "${workspaceFolder}",
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
             "name": "task",
             "program": "${workspaceFolder}/task",
             "args": ["help"],

@@ -14,6 +14,8 @@
 #include <cstdlib>
 #include <filesystem> // for filesystem::exists
 #include <iostream>
+#include <unordered_set>
+#include <algorithm>
 
 //-----------------------------------------------------------------------------
 // MACROS
@@ -50,14 +52,15 @@
 
 namespace now
 {
+    void   log_message(const char *format, ...);
+
     struct Allocator
     {
         Allocator()  {}
-        ~Allocator() {}
-
-        virtual void* allocate(size_t mem_size) = 0;
-        virtual void  deallocate(void* ptr) = 0;
-        virtual void* reallocate(void* ptr, size_t size) = 0;
+        virtual ~Allocator() {};
+        virtual void* malloc(size_t size) = 0;
+        virtual void  free(void* ptr) = 0;
+        virtual void* realloc(void* ptr, size_t size) = 0;
     };
 
     static Allocator* default_allocator();
@@ -65,104 +68,153 @@ namespace now
 
     struct NullAllocator : public Allocator
     {
-        void* allocate(size_t size) override
+        ~NullAllocator() = default;
+
+        void* malloc(size_t size) override
         { return nullptr; }
 
-        void deallocate(void* ptr) override
+        void free(void* ptr) override
         {}
 
-        void* reallocate(void* ptr, size_t size) override
+        void* realloc(void* ptr, size_t size) override
         { return nullptr; }
     };
+
+#ifdef NOW_DEBUG_MEMORY
+    struct Allocation_Tracker
+    {
+        const char* name = "default";
+
+        struct Allocation
+        {
+            void*  address;
+            size_t size;
+        };
+
+        void add_allocation(void* ptr, size_t size)
+        {   
+            assert( find_allocation(ptr) == nullptr && "Can't add same address twice!");
+            Allocation alloc;
+            alloc.address = ptr;
+            alloc.size    = size;
+            allocations.push_back(alloc);
+
+            LOG_DEBUG("[mem:%s] add %p (size: %lu)\n", name, ptr, size);
+        }
+
+        const Allocation* find_allocation(void* ptr) const
+        {
+            for(auto& each : allocations)
+                if (each.address == ptr)
+                    return &each;
+            return nullptr;
+        }
+
+        void remove_allocation(void* ptr)
+        {                       
+            auto it = std::find_if(
+                allocations.begin(), allocations.end(),
+                [ptr](auto& item){ return item.address == ptr; }
+            );
+            assert(it != allocations.end() && "Can't find any allocation with this address!"); 
+            allocations.erase(it);
+            LOG_DEBUG("[mem:%s] remove %p (size: %lu)\n", name, it->address, it->size);
+        }
+
+        std::vector<Allocation> allocations; // TODO: use a performant container when it will get too slow (unordered set, or something non std)
+    };
+#endif
 
     struct HeapAllocator : public Allocator
     {
-        void* allocate(size_t size) override
-        { return std::malloc(size); }
+#ifdef NOW_DEBUG_MEMORY
+        Allocation_Tracker tracker = {"heap"};
+#endif
+        ~HeapAllocator() = default;
 
-        void deallocate(void* ptr) override
-        { std::free(ptr); }
+        void* malloc(size_t size) override
+        {
+            void* ptr = std::malloc(size);
 
-        void* reallocate(void* ptr, size_t size) override
-        { return std::realloc(ptr, size); }
+            #ifdef NOW_DEBUG_MEMORY
+                tracker.add_allocation(ptr, size);
+            #endif
+            
+            return ptr;
+        }
+
+        void free(void* ptr) override
+        {
+            #ifdef NOW_DEBUG_MEMORY
+                tracker.remove_allocation(ptr);
+            #endif
+
+            return std::free(ptr);
+        }
+
+        void* realloc(void* ptr, size_t size) override
+        {
+            #ifdef NOW_DEBUG_MEMORY
+                tracker.remove_allocation(ptr);
+                tracker.add_allocation(ptr, size);
+            #endif
+
+            return std::realloc(ptr, size);
+        }
+
     };
 
-    struct RingBuffer
+    template<size_t SIZE_IN_BYTES>
+    struct RingBufferAllocator : public Allocator
     {
-        char*  data;
-        size_t size;
-        size_t next;
+        char   buffer[SIZE_IN_BYTES];
+        size_t next_pos = {0};
 
-        RingBuffer(size_t size_in_bytes)
-        : data(nullptr)
-        , size(size_in_bytes)
-        , next(0)
+        #ifdef NOW_DEBUG_MEMORY
+        Allocation_Tracker tracker = {"ring_buffer"};
+        #endif
+
+        void* malloc(size_t size) override
         {
-            init(size_in_bytes);
+            void* ptr = _acquire(size);
+            
+            return ptr;
         }
 
-        ~RingBuffer()
+        void free(void* ptr) override
         {
-            shutdown(); // We don't really need to do this, since this ring buffer should live for the entire execution of he program
+            #ifdef NOW_DEBUG_MEMORY
+                tracker.remove_allocation(ptr);
+            #endif
         }
 
-        void shutdown()
+        void* realloc(void* ptr, size_t size) override
         {
-            if (data)
-            {
-                default_allocator()->deallocate(data);
-                data = nullptr;
-            }
+            #ifdef NOW_DEBUG_MEMORY
+                tracker.remove_allocation(ptr);
+                tracker.add_allocation(ptr, size);
+            #endif
+
+            // TODO: reuse existing space
+            //       We could store the latest aquired ptr, and if it existing_ptr == ptr we could simply extend
+            return _acquire(size);
         }
 
-        void init(size_t size_in_bytes)
+        char* _acquire(size_t size)
         {
-            data = static_cast<char*>(default_allocator()->allocate(size_in_bytes));
-            assert(data);
-            std::memset(data, 0, size); // safer to zero-initialize
-        }
+            assert( size < SIZE_IN_BYTES/2 && "Increase RingBuffer!");
 
-        char* acquire(size_t mem_size)
-        {
-            assert(data != nullptr);
-            assert(mem_size < size);
-
-            if (mem_size == 0)
+            if ( size == 0 )
             {
                 return nullptr;
             }
 
-            char* result = &data[next];
-            next = (next + mem_size) % size;
+            char* result = buffer + next_pos;
+            next_pos = (next_pos + size) % SIZE_IN_BYTES;
             return result;
         }
     };
 
-    struct RingBufferAllocator : public Allocator
-    {
-        RingBuffer& buffer;
-
-        RingBufferAllocator(RingBuffer& buffer)
-        : buffer(buffer)
-        {}
-
-        ~RingBufferAllocator()
-        { /* nothing to do for a ring buffer */ }
-
-        void* allocate(size_t size) override
-        { return buffer.acquire(size); }
-
-        void deallocate(void* ptr) override
-        { /* nothing to do for a ring buffer */ }
-
-        void* reallocate(void* existing_ptr, size_t size) override
-        {
-            // TODO: reuse existing space
-            //       We could store the latest aquired ptr, and if it existing_ptr == ptr we could simply extend
-            return buffer.acquire(size);
-        }
-    };
-    
     static Allocator* default_allocator()
     {
         static HeapAllocator heap_allocator;
@@ -170,37 +222,43 @@ namespace now
     }
 
     static Allocator* temp_allocator()
-    {
-        static RingBuffer          ring_buffer{5 * 1024 * 1024};
-        static RingBufferAllocator ring_buffer_allocator{ring_buffer};
-        return &ring_buffer_allocator;
+    { 
+        static RingBufferAllocator<5*1024*1024> ring_buffer;
+        return &ring_buffer;
     }
 
     struct String
     {
-        static constexpr size_t invalid_index = (size_t)-1;
+        static constexpr Allocator* literal_allocator_placeholder = nullptr;
+        static constexpr size_t     invalid_index = (size_t)-1;
 
-        size_t      size;
-        char*       data;
-        Allocator*  allocator;
+        size_t      size      = {0};
+        char*       data      = {nullptr};
+        Allocator*  allocator = {nullptr};
 
-        String(Allocator* _allocator = default_allocator() )
-        : size(0)
-        , data(nullptr)
-        , allocator(_allocator)
-        {}
+        String()
+        {
+            allocator = default_allocator();
+        }
 
-        String(const char* str, Allocator* _allocator = default_allocator() )
+        String(Allocator* _allocator)
+        : allocator(_allocator)
+        {
+            assert(_allocator != nullptr);
+        }
+
+        String(const char* str)
         : size(strlen(str))
         , data(const_cast<char*>(str))
-        , allocator(_allocator)
+        , allocator(literal_allocator_placeholder)
         {}
 
-        String(size_t _size, char* _data, Allocator* _allocator = default_allocator() )
+        String(size_t _size, char* _data)
         : size(_size)
         , data(_data)
-        , allocator(_allocator)
-        {}
+        {
+            allocator = default_allocator();
+        }
 
 #define NOW_STD_COMPATIBILITY
 #ifdef NOW_STD_COMPATIBILITY
@@ -208,21 +266,27 @@ namespace now
         : size(str.size())
         , data(const_cast<char*>(str.data()))
         {}
-
-        operator std::filesystem::path ()
-        { return { data, data+size }; }
 #endif
-        void init(size_t _size, Allocator* allocator = default_allocator())
+
+        void init(size_t _size)
         {
             assert(data == nullptr);
-            size        = _size;
-            data        = static_cast<char*>(allocator->allocate(_size));
-            allocator   = allocator;
+            assert(allocator != nullptr);
+            size = _size;
+
+            #ifdef NOW_DEBUG_MEMORY
+                data = reinterpret_cast<char*>(allocator->malloc(_size+4));
+                std::memset(data, 'i', _size*sizeof(char)); // to help debugging
+                memcpy(data + size, "END\0", 4);
+            #else
+                data = reinterpret_cast<char*>(allocator->malloc(_size));
+            #endif
         }
 
         void free()
         {
-            allocator->deallocate(data);
+            assert( allocator != nullptr );
+            allocator->free(data);
             data = nullptr;
         }
 
@@ -242,13 +306,13 @@ namespace now
         String lsplit(size_t index)
         {
             assert(index < size && "Out of bounds");
-            return String{ index, data, allocator };
+            return String{ index, data };
         }
 
         String rsplit(size_t index)
         {
             assert(index < size && "Out of bounds");
-            return String{ size - index, data + index, allocator };
+            return String{ size - index, data + index };
         }
 
         String stem()
@@ -259,10 +323,15 @@ namespace now
             return lsplit(index);
         }
 
-        char* cstr(Allocator* allocator = temp_allocator() ) const // TODO: RingBuffer should be generic (usr virtuals or delegates)
+        char* cstr() const // TODO: RingBuffer should be generic (usr virtuals or delegates)
         {
+            if (allocator == literal_allocator_placeholder)
+            {
+                return data;
+            }
+
             size_t cstr_size = size+1;
-            char* ptr = static_cast<char*>( allocator->allocate(cstr_size) ); // +1 for null termination
+            char* ptr = reinterpret_cast<char*>( temp_allocator()->malloc(cstr_size) ); // +1 for null termination
             std::memcpy(ptr, data, size);
             ptr[cstr_size-1] = 0;
             return ptr;
@@ -293,43 +362,60 @@ namespace now
         size_t      size        = 0;
         T*          data        = nullptr;
         Allocator*  allocator   = nullptr;
-        size_t      capacity    = 0;
-        
-        Array(Allocator* _allocator = default_allocator())
+        //size_t      capacity    = 0;
+
+        Array()
+        : size(0)
+        , data(nullptr)
+        //, capacity(0)
+        {
+            allocator = default_allocator();
+        }
+
+        Array(Allocator* _allocator)
         : size(0)
         , data(nullptr)
         , allocator(_allocator)
-        , capacity(0)
-        {}
+        //, capacity(0)
+        {
+            assert(_allocator != nullptr);
+        }
 
         Array(std::initializer_list<T> list)
         : size(0)
         , data(nullptr)
-        , allocator(default_allocator())
-        , capacity(0)
+        //, capacity(0)
         {
+            allocator = default_allocator();
             resize(list.size());
             std::copy(list.begin(), list.end(), data);
         }
 
+        ~Array()
+        {
+        }
+
         void free()
         {
-            allocator->deallocate(data);
+            assert(allocator != nullptr);
+            allocator->free(data);
             data     = nullptr;
             size     = 0;
-            capacity = 0;
+            //capacity = 0;
         }
 
         void resize(size_t new_size)
         {
             assert(new_size >= size);
+            assert(allocator != nullptr);
 
             // ensure has capacity
-            if( new_size > capacity )
+            if( new_size > size )
             {
                 if( data == nullptr )
                 {
-                    data = static_cast<T*>(allocator->allocate(new_size));
+                    assert(allocator != nullptr);
+                    data = reinterpret_cast<T*>(allocator->malloc(new_size));
 
                     for( size_t i=0; i < new_size; i++)
                         new (data+i) T(); // construct in-place
@@ -339,14 +425,15 @@ namespace now
                     T*     old_data = data;
                     size_t old_size = size;
 
-                    data = static_cast<T*>(allocator->reallocate(data, new_size));
+                    assert(allocator != nullptr);
+                    data = reinterpret_cast<T*>(allocator->realloc(data, new_size));
                     std::copy(old_data, old_data+old_size, data);
-
+                    
                     for( size_t i=old_size; i < new_size; i++)
                         new (data+i) T(); // construct in-place
                 }
             }
-
+            //capacity = new_size; // Currently capacity == size, but that's temporary.
             size = new_size;
         }
 
@@ -363,40 +450,46 @@ namespace now
             resize(size + other.size);
             for (size_t i = 0; i < other.size; ++i )
             {
-                (*this)[old_size+i] = other[i];
+                this->at(old_size+i) = other.at(i);
             }
         }
 
-        const T& operator[](size_t pos) const
+        const T& at(size_t pos) const
         { assert(pos < size && "out of bounds"); return *(data + pos); }
 
-        T& operator[](size_t pos)
+        T& at(size_t pos)
         { assert(pos < size && "out of bounds"); return *(data + pos); }
-   
-        String join(const char* separator = "", Allocator* allocator = default_allocator() ) const;
     };
 
     struct StringBuilder
     {
         Array<String> data;
 
-        StringBuilder(Allocator* allocator = default_allocator())
-        : data(allocator)
-        {}
+        StringBuilder()
+        : data()
+        {
+            data.allocator = temp_allocator();
+        }
+
+        StringBuilder(Allocator* allocator)
+        : data()
+        {
+            data.allocator = allocator;
+        }
 
         StringBuilder&  append(const char* str);
         StringBuilder&  append(String str);
         template<typename T>  
         StringBuilder&  append(const Array<T>& arr);              
-        String          join(String separator = "", Allocator* allocator = default_allocator() );
+        String          build_string(String separator = "", Allocator* allocator = temp_allocator() );
     };
 
-    void    log_message(const char *format, ...);
-    int     system(String command, Array<String> args= {}, bool fatal = true);
-    void    remove(String path);
-    void    rename(String src, String dst);
-    int     mkdir_p(String path);
-    bool    exists(String path);
+    int     system(const String& command, const Array<String>& args= {}, bool fatal = true);
+    void    remove(const String& path);
+    void    rename(const String& src, const String& dst);
+    int     mkdir_p(const String& path);
+    bool    exists(const String& path);
+    String  join(const Array<String>& arr, String separator = "", Allocator* string_allocator = temp_allocator() );
 
     typedef int Code;
     enum Code_ {
@@ -430,7 +523,7 @@ namespace now
         struct StringHash
         {
             using is_transparent = void;
-            size_t operator()(String s) const   { return std::hash<std::string_view>{}( s.cstr(temp_allocator())); }
+            size_t operator()(String s) const   { return std::hash<std::string_view>{}( s.cstr() ); }
         };
 
         struct StringEqual
@@ -455,20 +548,44 @@ namespace now
     static void         compile_object(now::String src);
     static void         link(String binary, Array<String>& objects);
     static void         init();
-    static void         rebuild_it_self_if_needed(const String& binary, const String& source);
+    static void         rebuild_it_self_if_needed(String binary, String source);
 }
 
 #ifdef NOW_IMPLEMENTATION
 
-template <typename T>
-now::String now::Array<T>::join(const char* separator, Allocator* allocator) const
+now::String now::join(const Array<String>& arr, String separator, Allocator* string_allocator )
 {
-    StringBuilder sb;
-    for(size_t i = 0; i < size; i++)
+    assert(string_allocator != nullptr);
+
+    // init a string to store each data with a separator
+    size_t temp_size = 0;
+    for( size_t i = 0; i < arr.size; i++)
+        temp_size += arr.at(i).size;
+    if( separator.size > 0 && arr.size > 1)
+        temp_size += separator.size * (arr.size-1); // 1 separator after each, except last
+
+    String result{string_allocator};
+    result.init(temp_size);
+    
+    assert(result.data != nullptr);
+    char* cursor = result.data;
+    for(size_t i = 0; i < arr.size; ++i)
     {
-        sb.append( data[i] );
+        if ( i && separator.size )
+        {
+            memcpy(cursor, separator.data, separator.size);
+            cursor += separator.size;
+            LOG_DEBUG("%s\n", result.data);
+        }
+        char* dst = arr.at(i).data;
+        assert(dst != nullptr);
+        memcpy(cursor, dst, arr.at(i).size);
+        cursor += arr.at(i).size;
+        LOG_DEBUG("%s\n", result.data);
     }
-    return sb.join(separator, allocator);
+    LOG_DEBUG("%s\n", result.data);
+
+    return result;
 }
 
 now::StringBuilder& now::StringBuilder::append(const char* str)
@@ -493,37 +610,9 @@ now::StringBuilder& now::StringBuilder::append(const Array<T>& arr)
     return *this;
 }
 
-now::String now::StringBuilder::join(String separator, Allocator* allocator)
+now::String now::StringBuilder::build_string(String separator, Allocator* allocator)
 {
-    // init a string to store each data with a separator
-    size_t temp_size = 0;
-    for( size_t i = 0; i < data.size; i++)
-        temp_size += data[i].size;
-    if( separator.size > 0 && data.size > 1)
-        temp_size += separator.size * (data.size-1); // 1 separator after each, except last
-
-    String result;
-    result.init(temp_size, allocator);
-    result.data[temp_size-1] = 0;
-    
-    char* cursor = result.data;
-    for(size_t i = 0; i < data.size; ++i)
-    {
-        if ( i && separator.size )
-        {
-            memcpy(cursor, separator.data, separator.size);
-            cursor += separator.size;
-            //LOG("%s\n", temp.data);
-        }
-        memcpy(cursor, data[i].data, data[i].size);
-        cursor += data[i].size;
-        //LOG("%s\n", temp.data);
-    }
-    //LOG("%s\n", temp.data);
-
-    data.free();
-
-    return result;
+    return join(this->data, separator, allocator);
 }
 
 void now::log_message(const char *format, ...)
@@ -534,29 +623,30 @@ void now::log_message(const char *format, ...)
   va_end(args);
 }
 
-int now::system(String command, Array<String> args, bool fatal)
+int now::system(const String& command, const Array<String>& args, bool fatal)
 {
     StringBuilder sb;
     sb.append(command);
     sb.append(args);
-    String temp_str = sb.join(" ");
-    LOG("%s\n", temp_str.cstr());
-    int code = std::system(temp_str.cstr());
-    if (code && fatal) LOG("-- ERR: Unable to run: %s\n", temp_str.cstr());
+    const char* temp = sb.build_string(" ").cstr();
+
+    LOG("%s\n", temp);
+    int code = std::system( temp );
+    if (code && fatal) LOG("-- ERR: Unable to run: %s\n", temp);
     return code;
 }
 
-void now::remove(String path)
+void now::remove(const String& path)
 {
-    std::filesystem::remove(path);
+    std::filesystem::remove(path.cstr());
 }
 
-void now::rename(String src, String dst)
+void now::rename(const String& src, const String& dst)
 {
-    std::filesystem::rename(src, dst);
+    std::filesystem::rename(src.cstr(), dst.cstr());
 }
 
-int now::mkdir_p(String path)
+int now::mkdir_p(const String& path)
 {
 #if __unix__ or __DARWIN__
     return now::system( "mkdir", { "-p", path.c_str()} );
@@ -565,7 +655,7 @@ int now::mkdir_p(String path)
 #endif
 }
 
-bool now::exists(String path)
+bool now::exists(const String& path)
 {
     return std::filesystem::exists(path.cstr());
 }
@@ -620,7 +710,7 @@ now::Code now::invoke_task(const State& state, const Task* task)
     // dependencies
     for (size_t i = 0; i < task->deps.size; ++i)
     {       
-        String dep = task->deps[i];
+        String dep = task->deps.at(i);
         const Task* dep_task = find_task(state, dep);
         if (!dep_task)
         {
@@ -726,7 +816,7 @@ int now::parse_args(int argc, char* argv[])
 void now::compile_object(String src)
 {
     Array<String> obj = { BUILD_DIR, "/", src.stem(), ".o" };
-    now::system( COMPILER, { CXXFLAGS, "-c", src.cstr(), "-o", obj.join().cstr() } );
+    now::system( COMPILER, { CXXFLAGS, "-c", src.cstr(), "-o", join(obj).cstr() } );
 
 }
 
@@ -738,7 +828,7 @@ void now::link(String binary, Array<String>& objects)
         sb.append(binary);
         sb.append(".old");
 
-        String binary_old = sb.join();
+        String binary_old = sb.build_string();
 
         if (exists(binary_old)) remove(binary_old);
         if (exists(binary))     rename(binary, binary_old);
@@ -818,25 +908,26 @@ namespace now
     }
 };
 
-void now::rebuild_it_self_if_needed(const String& binary, const String& source)
+void now::rebuild_it_self_if_needed(String binary, String source)
 {   
     bool needs_to_rebuild = std::filesystem::last_write_time(binary.cstr()) < std::filesystem::last_write_time(source.cstr()); // TODO: uses *.d files, the cpp might include dependencies that may have change.
 
-    if (needs_to_rebuild)
+    //if (needs_to_rebuild)
     {
         // Rename current binary (we can't overwrite it while running, but we can rename it)
-        const char * new_name = Array<String>{binary, ".old"}.join("", temp_allocator()).cstr();
-        now::rename(binary, new_name );
+        Array<String> arr{binary, ".old"};
+        now::rename(binary, join(arr, temp_allocator()).cstr() );
 
         // Compiles
-        now::system(COMPILER, {
+        Array<String> args = {
             CXXFLAGS,
-            //"-g -O0",
+            "-g -O0",
             "task.cpp",
             "-o",
             binary,
             "-MMD", "-MF", "task.d"
-        });
+        };
+        now::system(COMPILER, args);
 
         // Run again and exit (we don't want to run the tasks twice!)
         int code = now::system(binary);
