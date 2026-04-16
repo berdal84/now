@@ -128,7 +128,7 @@ namespace now
             allocations.reserve(512);
         };
 
-        void register_allocation(void* ptr, size_t size)
+        void after_allocate(void* ptr, size_t size)
         {   
             assert(ptr != nullptr);
             assert( find_allocation(ptr) == nullptr && "Address already used!");
@@ -147,7 +147,7 @@ namespace now
             return nullptr;
         }
 
-        void register_reallocation(void* old_ptr, void* new_ptr, size_t new_size )
+        void after_reallocate(void* old_ptr, void* new_ptr, size_t new_size )
         {
             assert(old_ptr != nullptr);
             assert(new_ptr != nullptr);
@@ -164,7 +164,7 @@ namespace now
             LOG_DEBUG("[mem:%s] realloc %lu byte(s) at %p (previously: %p, %lu byte(s))\n", name, new_size, new_ptr, old->ptr, old->size);
         }
 
-        void register_release(void* ptr)
+        void register_before_release(void* ptr)
         {               
             assert(ptr != nullptr);        
             auto it = std::find_if(
@@ -174,11 +174,10 @@ namespace now
 
             if ( it == allocations.end() )
             {
-                LOG_DEBUG("[mem:%s] WARN: releasing on a non-owned pointer at %p\n", name, ptr); 
-                return;
+                LOG_DEBUG("[mem:%s] WARN: allocation at %p will be released but: WAS NOT REGISTERED. Will crash.\n", name, ptr); 
+                assert(false);
             }
 
-            allocations.erase(it);
             LOG_DEBUG("[mem:%s] released %p (known size: %lu)\n", name, it->ptr, it->size);
         
             if ( allocations.size() == 0 )
@@ -201,7 +200,7 @@ namespace now
 
             #ifdef NOW_DEBUG_MEMORY
                 assert(ptr != nullptr);
-                heap_allocation_tracker.register_allocation(ptr, size);
+                heap_allocation_tracker.after_allocate(ptr, size);
             #endif
             
             return ptr;
@@ -209,11 +208,11 @@ namespace now
 
         static void release(void* ptr)
         {
-            free(ptr);
-
             #ifdef NOW_DEBUG_MEMORY
-                heap_allocation_tracker.register_release(ptr);
+                heap_allocation_tracker.register_before_release(ptr);
             #endif
+
+            free(ptr);
         }
 
         static void* reallocate(void* ptr, size_t size)
@@ -228,7 +227,7 @@ namespace now
 
             #ifdef NOW_DEBUG_MEMORY                
                 assert(new_ptr != nullptr);
-                heap_allocation_tracker.register_reallocation(old_ptr, new_ptr, size);
+                heap_allocation_tracker.after_reallocate(old_ptr, new_ptr, size);
             #endif
 
             return new_ptr;
@@ -285,7 +284,7 @@ namespace now
             char* ptr = _acquire(size);
 
             #ifdef NOW_DEBUG_MEMORY
-                state().tracker.register_allocation(ptr, size);
+                state().tracker.after_allocate(ptr, size);
             #endif     
 
             return ptr;
@@ -294,7 +293,7 @@ namespace now
         static void release(void* ptr)
         {
             #ifdef NOW_DEBUG_MEMORY
-                state().tracker.register_release(ptr);
+                LOG_DEBUG("Ring_Buffer_Allocator::release() - nothing to do ...\n");
             #endif
         }
 
@@ -310,7 +309,7 @@ namespace now
             void* new_ptr =  _acquire(size);
 
             #ifdef NOW_DEBUG_MEMORY
-                state().tracker.register_reallocation(old_ptr, new_ptr, size);
+                state().tracker.after_reallocate(old_ptr, new_ptr, size);
             #endif
 
             return new_ptr;
@@ -536,7 +535,7 @@ namespace now
                 if( data == nullptr )
                 {
                     assert(allocator != nullptr);
-                    data = reinterpret_cast<T*>(allocator->allocate(new_size));
+                    data = reinterpret_cast<T*>(allocator->allocate( new_size * sizeof(T)));
                     assert(data!=nullptr);
                     size = new_size;
                     
@@ -549,7 +548,7 @@ namespace now
                     size_t old_size = size;
 
                     assert(allocator != nullptr);
-                    data = reinterpret_cast<T*>(allocator->reallocate(old_data, new_size));
+                    data = reinterpret_cast<T*>(allocator->reallocate(old_data, new_size * sizeof(T)));
                     assert(data!=nullptr);
                     size = new_size;
 
