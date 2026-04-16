@@ -12,6 +12,10 @@
             "args": ["help"],
             "cwd": "${workspaceFolder}",
             "terminal": "external",
+            "presentation": {
+                "revealProblems": "onError",
+                "close": true
+            }
         },
     ],
     

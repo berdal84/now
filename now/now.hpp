@@ -20,14 +20,6 @@
 // MACROS
 // ----------------------------------------------------------------------------
 
-#define NOW_RUN_TESTS() \
-    now::run_tests(); \
-    exit(0);
-
-#define NOW_INITIALIZE()\
-    now::initialize();\
-    NOW_RUN_TESTS();
-
 #define LOG(FMT, ...) now::log_message(FMT, __VA_ARGS__ )
 
 #ifdef NOW_VERBOSE
@@ -62,7 +54,7 @@ namespace now
     struct Allocator;
     static Allocator* temp_allocator();
     static Allocator* heap_allocator();
-    static Allocator* null_allocator();
+    // static Allocator* null_allocator();
     static Allocator* default_allocator();
 
     void log_message(const char *format, ...);
@@ -346,11 +338,11 @@ namespace now
         return &heap_allocator;
     }
 
-    static Allocator* null_allocator()
-    {
-        static Allocator null_allocator = Allocator::construct_from<Null_Allocator>("null");
-        return &null_allocator;
-    }
+    // static Allocator* null_allocator()
+    // {
+    //     static Allocator null_allocator = Allocator::construct_from<Null_Allocator>("null");
+    //     return &null_allocator;
+    // }
 
     static Allocator* default_allocator()
     { return heap_allocator(); }
@@ -381,7 +373,7 @@ namespace now
         String(const char* str)
         : size(strlen(str))
         , data(const_cast<char*>(str))
-        , allocator(null_allocator())
+        , allocator(nullptr)
         {}
 
         String(size_t _size, char* _data)
@@ -465,26 +457,19 @@ namespace now
 
         char* cstr() const // TODO: RingBuffer should be generic (usr virtuals or delegates)
         {
-            if (allocator == null_allocator())
-            {
-                return data;
-            }
-
-            size_t cstr_size = size+1;
-            char* ptr = reinterpret_cast<char*>( default_allocator()->allocate(cstr_size) ); // +1 for null termination
-            std::memcpy(ptr, data, size);
-            ptr[cstr_size-1] = 0;
-            return ptr;
+            return data;
         }
 
-        static String copy(size_t source_size, char* source_data)
-        { return String::copy(String{source_size, source_data}); }
+        static String copy(size_t source_size, char* source_data, Allocator* copy_allocator = default_allocator() )
+        { return String::copy(String{source_size, source_data}, copy_allocator); }
 
-        static String copy(const String source)
+        static String copy(const String source, Allocator* copy_allocator = default_allocator())
         {
-            String result;
+            String result{copy_allocator};
             result.init(source.size);
             std::memcpy(result.data, source.data, source.size);
+            assert(source.size == result.size);
+            assert(source.data != result.data);
             return result;
         }
 
@@ -634,7 +619,10 @@ namespace now
     void    rename(const String& src, const String& dst);
     int     mkdir_p(const String& path);
     bool    exists(const String& path);
-    String  join(const Array<String>& arr, String separator = "", Allocator* string_allocator = default_allocator() );
+
+    String  join(const Array<String>& arr, String separator, Allocator* string_allocator = default_allocator() );
+    String  join(const Array<String>& arr, Allocator* string_allocator = default_allocator() )
+    { return join(arr, "", string_allocator ); }
 
     typedef int Code;
     enum Code_ {
@@ -700,7 +688,6 @@ namespace now
 }
 
 #ifdef NOW_IMPLEMENTATION
-
 now::String now::join(const Array<String>& arr, String separator, Allocator* string_allocator )
 {
     assert(string_allocator != nullptr);
@@ -781,7 +768,7 @@ int now::system(const String& command, const Array<String>& args, bool fatal)
     StringBuilder sb{};
     sb.append(command);
     sb.append(args);
-    String temp = sb.build_string(" ");
+    String temp = sb.build_string(" ", temp_allocator() );
 
     LOG("%s\n", temp.cstr() );
     int code = std::system( temp.data );
@@ -1011,36 +998,39 @@ namespace now
 {
     struct Dependencies
     {
-        now::String target;
-        now::Array<now::String> deps;
+        bool                    could_not_parse = false;
+        now::String             target;
+        now::Array<now::String> files;
     };
 
     Dependencies parse_d_file(const char *filename)
     {
-        LOG("Parsing %s ...\n", filename);
+        LOG_DEBUG("Parsing '%s' ...\n", filename);
         Dependencies result;
         FILE *file = fopen(filename, "r");
         
         if (!file)
         {
-            LOG("ERR: fopen %s\n", filename);
+            LOG_DEBUG("ERR: fopen %s\n", filename);
+            result.could_not_parse = true;
             return result;
         }
         
-        char* curr_line;
+        char curr_line[255];
         if ( fgets(curr_line, sizeof(curr_line), file))
         {
             // Find the colon separator
             char *colon_ptr = strchr(curr_line, ':');
             if ( colon_ptr == nullptr)
             {
-                LOG("WARN: Unable to find a ':' colon!\n", filename);
+                LOG_DEBUG("WARN: Unable to find a ':' colon!\n", filename);
+                result.could_not_parse = true;
             }
             else
             {
                 // Extract target
                 result.target = String::copy(colon_ptr - curr_line, curr_line);
-                LOG("Target found: %s\n", result.target.cstr());
+                LOG_DEBUG("Target found: %s\n", result.target.cstr());
 
                 // Parse dependencies
                 char *deps_str = colon_ptr + 1;
@@ -1049,8 +1039,8 @@ namespace now
                 while (token != nullptr)
                 {
                     String dep = String::copy(token);
-                    result.deps.append( dep );
-                    LOG("Dependency #%i found: %s\n", result.deps.size, dep.cstr() );
+                    result.files.append( dep );
+                    LOG_DEBUG("Dependency #%i found: %s\n", result.files.size, dep.cstr() );
                     token = strtok(NULL, " \t\n");
                 }
             }
@@ -1064,14 +1054,27 @@ namespace now
 void now::rebuild_it_self_if_needed(String binary, String source)
 {   
 #ifndef NOW_ALWAYS_REBUILD
-    bool needs_to_rebuild = std::filesystem::last_write_time(binary.cstr()) < std::filesystem::last_write_time(source.cstr()); // TODO: uses *.d files, the cpp might include dependencies that may have change.
 
-    if (needs_to_rebuild)
+    bool needs_to_rebuild = false;
+    Dependencies dependencies = parse_d_file("task.d");    
+    auto binary_time = std::filesystem::last_write_time( binary.cstr() );
+    for(size_t i = 0; i < dependencies.files.size; i++)
+    {        
+        auto dependency_time = std::filesystem::last_write_time( dependencies.files.at(i).cstr() );
+        needs_to_rebuild |=  binary_time < dependency_time;
+
+        if ( needs_to_rebuild )
+        {
+            LOG_DEBUG("%s needs to be recompiled, %s changed\n", dependencies.target.cstr(), dependencies.files.at(i).cstr() );
+            break;
+        }
+    }
+
+    if ( needs_to_rebuild || dependencies.could_not_parse )
 #endif
     {
         // Rename current binary (we can't overwrite it while running, but we can rename it)
-        Array<String> arr{binary, ".old"};
-        now::rename(binary, join(arr, temp_allocator() ).cstr() );
+        now::rename(binary, join({binary, ".old"}, temp_allocator() ).cstr() );
 
         // Compiles
         Array<String> args = {
@@ -1083,7 +1086,6 @@ void now::rebuild_it_self_if_needed(String binary, String source)
             binary,
             "-MMD", "-MF", "task.d"
         };
-        String test = join(args);
         now::system(COMPILER, args);
 
         // Run again and exit (we don't want to run the tasks twice!)
@@ -1111,12 +1113,12 @@ void now::run_tests()
 
     {
         String str{"Hello"};
-        assert( str.allocator == null_allocator() );
+        assert( str.allocator == nullptr );
     }
 
     {
         String str = "Hello";
-        assert( str.allocator == null_allocator() );
+        assert( str.allocator == nullptr );
     }
 
     {
