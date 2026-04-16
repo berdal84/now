@@ -11,7 +11,7 @@
             "program": "${workspaceFolder}/task",
             "args": ["help"],
             "cwd": "${workspaceFolder}",
-            "terminal": "integrated"
+            "terminal": "external",
         },
     ],
     
