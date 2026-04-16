@@ -28,9 +28,6 @@
     now::initialize();\
     NOW_RUN_TESTS();
 
-#define NOW_NEW_ALLOCATOR_FROM(CLASS) \
-    now::Allocator::new_from<CLASS>(#CLASS);
-
 #define LOG(FMT, ...) now::log_message(FMT, __VA_ARGS__ )
 
 #ifdef NOW_VERBOSE
@@ -63,13 +60,11 @@
 namespace now
 {
     struct Allocator;
-    
-    static Allocator* default_allocator = nullptr;
-    static Allocator* temp_allocator    = nullptr;
-    static Allocator* heap_allocator    = nullptr;
-    static Allocator* null_allocator    = nullptr;
+    static Allocator* temp_allocator();
+    static Allocator* heap_allocator();
+    static Allocator* null_allocator();
+    static Allocator* default_allocator();
 
-    void initialize();
     void log_message(const char *format, ...);
 
     //-----------------------------------------------------------------------------
@@ -96,17 +91,15 @@ namespace now
         }
 
         template<typename AllocatorType>
-        static Allocator* new_from(const char* _name)
+        static Allocator construct_from(const char* _name)
         {
-
-            Allocator* allocator = new Allocator{
+            LOG_DEBUG("[mem] new %s\n", _name);
+            return Allocator{
                 _name,
                 &AllocatorType::allocate,
                 &AllocatorType::release,
                 &AllocatorType::reallocate,
             };
-            LOG_DEBUG("[mem] new %s\n", _name);
-            return allocator;
         }
     };
 
@@ -131,7 +124,7 @@ namespace now
         void after_allocate(void* ptr, size_t size)
         {   
             assert(ptr != nullptr);
-            assert( find_allocation(ptr) == nullptr && "Address already used!");
+            assert( find_allocation(ptr) == nullptr );
 
             allocations.emplace_back(Allocation{ ptr, size });
 
@@ -188,19 +181,23 @@ namespace now
     };
 #endif
 
-#ifdef NOW_DEBUG_MEMORY
-    static Allocation_Tracker heap_allocation_tracker{"heap"};
-#endif
-
     struct Heap_Allocator
     {
+        #ifdef NOW_DEBUG_MEMORY
+            static Allocation_Tracker& tracker()
+            {
+                static Allocation_Tracker heap_allocation_tracker{"heap"};
+                return heap_allocation_tracker;
+            }
+        #endif
+
         static void* allocate(size_t size)
         {
             void* ptr = malloc(size);
 
             #ifdef NOW_DEBUG_MEMORY
                 assert(ptr != nullptr);
-                heap_allocation_tracker.after_allocate(ptr, size);
+                tracker().after_allocate(ptr, size);
             #endif
             
             return ptr;
@@ -209,7 +206,7 @@ namespace now
         static void release(void* ptr)
         {
             #ifdef NOW_DEBUG_MEMORY
-                heap_allocation_tracker.register_before_release(ptr);
+                tracker().register_before_release(ptr);
             #endif
 
             free(ptr);
@@ -227,7 +224,7 @@ namespace now
 
             #ifdef NOW_DEBUG_MEMORY                
                 assert(new_ptr != nullptr);
-                heap_allocation_tracker.after_reallocate(old_ptr, new_ptr, size);
+                tracker().after_reallocate(old_ptr, new_ptr, size);
             #endif
 
             return new_ptr;
@@ -337,6 +334,27 @@ namespace now
         }
     };
 
+    static Allocator* temp_allocator()
+    {
+        static Allocator temp_allocator = Allocator::construct_from<Ring_Buffer_Allocator<5*1024*1024>>("temp");
+        return &temp_allocator;
+    }
+
+    static Allocator* heap_allocator()
+    {
+        static Allocator heap_allocator = Allocator::construct_from<Heap_Allocator>("heap");
+        return &heap_allocator;
+    }
+
+    static Allocator* null_allocator()
+    {
+        static Allocator null_allocator = Allocator::construct_from<Null_Allocator>("null");
+        return &null_allocator;
+    }
+
+    static Allocator* default_allocator()
+    { return heap_allocator(); }
+
     //-----------------------------------------------------------------------------
     // STRINGS
     // ----------------------------------------------------------------------------
@@ -351,7 +369,7 @@ namespace now
 
         String()
         {
-            allocator = heap_allocator;
+            allocator = heap_allocator();
         }
 
         String(Allocator* _allocator)
@@ -363,14 +381,14 @@ namespace now
         String(const char* str)
         : size(strlen(str))
         , data(const_cast<char*>(str))
-        , allocator(null_allocator)
+        , allocator(null_allocator())
         {}
 
         String(size_t _size, char* _data)
         : size(_size)
         , data(_data)
         {
-            allocator = heap_allocator;
+            allocator = heap_allocator();
         }
 
 // #define NOW_STD_COMPATIBILITY
@@ -391,14 +409,9 @@ namespace now
             assert(data == nullptr);
             assert(allocator != nullptr);
             size = _size;
-
-            #ifdef NOW_DEBUG_MEMORY
-                data = reinterpret_cast<char*>(allocator->allocate(_size+4));
-                std::memset(data, 'i', _size); // to help debugging
-                memcpy(data + size, "END\0", 4);
-            #else
-                data = reinterpret_cast<char*>(allocator->allocate(_size));
-            #endif
+            size_t safe_size = _size + 1; // for '\0'
+            data = reinterpret_cast<char*>( allocator->allocate( safe_size ) );
+            data[safe_size-1] = 0;
         }
 
         void release()
@@ -434,6 +447,14 @@ namespace now
             return String{ size - index, data + index };
         }
 
+        String basename()
+        {
+            size_t last_slash = rfind('\\');
+            if ( last_slash == npos )
+                return *this;
+            return rsplit(last_slash+1);
+        }
+
         String stem()
         {
             size_t index = rfind('.');
@@ -444,13 +465,13 @@ namespace now
 
         char* cstr() const // TODO: RingBuffer should be generic (usr virtuals or delegates)
         {
-            if (allocator == null_allocator)
+            if (allocator == null_allocator())
             {
                 return data;
             }
 
             size_t cstr_size = size+1;
-            char* ptr = reinterpret_cast<char*>( default_allocator->allocate(cstr_size) ); // +1 for null termination
+            char* ptr = reinterpret_cast<char*>( default_allocator()->allocate(cstr_size) ); // +1 for null termination
             std::memcpy(ptr, data, size);
             ptr[cstr_size-1] = 0;
             return ptr;
@@ -480,7 +501,7 @@ namespace now
 
         size_t      size      = 0;
         void*       data      = nullptr;
-        Allocator*  allocator = null_allocator;
+        Allocator*  allocator = nullptr;
         //size_t      capacity    = 0;
 
         Array()
@@ -488,7 +509,7 @@ namespace now
         , data(nullptr)
         //, capacity(0)
         {
-            allocator = heap_allocator;
+            allocator = default_allocator();
         }
 
         Array(Allocator* _allocator)
@@ -505,7 +526,7 @@ namespace now
         , data(nullptr)
         //, capacity(0)
         {
-            allocator = heap_allocator;
+            allocator = default_allocator();
             this->resize(list.size());
             for(size_t i = 0; i < size; i++)
                 at(i) = *(list.begin()+i);
@@ -592,7 +613,7 @@ namespace now
         StringBuilder()
         : data()
         {
-            data.allocator = default_allocator;
+            data.allocator = default_allocator();
         }
 
         StringBuilder(Allocator* allocator)
@@ -605,7 +626,7 @@ namespace now
         StringBuilder&  append(String str);
         template<typename T>  
         StringBuilder&  append(const Array<T>& arr);              
-        String          build_string(String separator = "", Allocator* allocator = default_allocator );
+        String          build_string(String separator = "", Allocator* allocator = default_allocator() );
     };
 
     int     system(const String& command, const Array<String>& args= {}, bool fatal = true);
@@ -613,7 +634,7 @@ namespace now
     void    rename(const String& src, const String& dst);
     int     mkdir_p(const String& path);
     bool    exists(const String& path);
-    String  join(const Array<String>& arr, String separator = "", Allocator* string_allocator = default_allocator );
+    String  join(const Array<String>& arr, String separator = "", Allocator* string_allocator = default_allocator() );
 
     typedef int Code;
     enum Code_ {
@@ -740,14 +761,6 @@ now::StringBuilder& now::StringBuilder::append(const Array<T>& arr)
 now::String now::StringBuilder::build_string(String separator, Allocator* allocator)
 {
     return join(this->data, separator, allocator);
-}
-
-void now::initialize()
-{
-    //null_allocator = Allocator::new_from<NullAllocator>("NullAllocator");
-    temp_allocator    = NOW_NEW_ALLOCATOR_FROM(Ring_Buffer_Allocator<5*1024*1024>);
-    heap_allocator    = NOW_NEW_ALLOCATOR_FROM(Heap_Allocator);
-    default_allocator = heap_allocator;
 }
 
 void now::log_message(const char *format, ...)
@@ -903,7 +916,7 @@ void now::print_tasks(State& state)
 
 void now::print_help(now::State& state)
 {
-    LOG("Usage: %s <task> [<task2>, ...]\n\n", state.binary.cstr() );
+    LOG("Usage: %s <task> [<task2>, ...]\n\n", state.binary.basename().cstr() );
     now::print_tasks( state );
 }
 
@@ -1058,11 +1071,12 @@ void now::rebuild_it_self_if_needed(String binary, String source)
     {
         // Rename current binary (we can't overwrite it while running, but we can rename it)
         Array<String> arr{binary, ".old"};
-        now::rename(binary, join(arr, default_allocator).cstr() );
+        now::rename(binary, join(arr, temp_allocator() ).cstr() );
 
         // Compiles
         Array<String> args = {
             CXXFLAGS,
+            "-D_CRT_SECURE_NO_WARNINGS",
             "-g -O0",
             "task.cpp",
             "-o",
@@ -1076,6 +1090,10 @@ void now::rebuild_it_self_if_needed(String binary, String source)
         int code = now::system(binary);
         exit(code);
     }
+
+    #ifdef NOW_ENABLE_TESTS
+        run_tests();
+    #endif
 }
 
 #endif
@@ -1088,17 +1106,17 @@ void now::run_tests()
     // String
     {
         String str;
-        assert(str.allocator == heap_allocator);
+        assert( str.allocator == heap_allocator() );
     }
 
     {
         String str{"Hello"};
-        assert(str.allocator == null_allocator);
+        assert( str.allocator == null_allocator() );
     }
 
     {
         String str = "Hello";
-        assert(str.allocator == null_allocator);
+        assert( str.allocator == null_allocator() );
     }
 
     {
@@ -1109,7 +1127,7 @@ void now::run_tests()
     // Array
     {
         Array<String> arr;
-        assert(arr.allocator == heap_allocator );
+        assert( arr.allocator == heap_allocator() );
     }
 
     {

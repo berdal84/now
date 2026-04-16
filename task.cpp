@@ -4,17 +4,15 @@
 #define COMPILER     "clang++"
 #define CXXFLAGS     "--std=c++20 -Wno-braced-scalar-init" // warning: braces around scalar initializer [-Wbraced-scalar-init]
 #define NOW_IMPLEMENTATION
-#define NOW_DEBUG_MEMORY
-#define NOW_VERBOSE
-#define NOW_ALWAYS_REBUILD
-#define NOW_ENABLE_TESTS
+//#define NOW_DEBUG_MEMORY
+//#define NOW_VERBOSE
+//#define NOW_ALWAYS_REBUILD
+//#define NOW_ENABLE_TESTS
 #include "now/now.hpp"
 #include <format>
 
 int main(int argc, char** argv)
 {
-    NOW_INITIALIZE();
-
     // do not put code before this line, it should always be able to rebuild itself
     now::rebuild_it_self_if_needed("task.exe", "task.cpp");
 

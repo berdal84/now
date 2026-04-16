@@ -3,3 +3,4 @@ build
 *.exe.old
 *.ilk
 *.pdb
+*.d
