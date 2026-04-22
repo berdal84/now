@@ -16,6 +16,8 @@ namespace now
     void log_message(const char *format, ...);
 }
 
+#ifdef NOW_IMPLEMENTATION
+
 void now::log_message(const char *format, ...)
 {
     va_list args;
@@ -26,6 +28,8 @@ void now::log_message(const char *format, ...)
 #ifdef NOW_DEBUG
     // In case of crash, we want to see the output immediately
     _flushall();
-#endif
+#endif // NOW_DEBUG
 
 }
+
+#endif // NOW_IMPLEMENTATION

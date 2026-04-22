@@ -35,6 +35,8 @@ namespace now
     { return join(arr, "", string_allocator ); }
 }
 
+#ifdef NOW_IMPLEMENTATION
+
 now::StringBuilder& now::StringBuilder::append(const char* str)
 {
     append(String{str});
@@ -96,3 +98,5 @@ now::String now::join(const Array<String>& arr, String separator, Allocator* str
 
     return result;
 }
+
+#endif // NOW_IMPLEMENTATION

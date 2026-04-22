@@ -5,17 +5,17 @@
 #include <unordered_map>
 #include <filesystem>
 
-#include "String.hpp"
-#include "Array.hpp"
-#include "Logging.hpp"
-#include "String_Builder.hpp"
+#include "src/Allocator.hpp"
+#include "src/Array.hpp"
+#include "src/Logging.hpp"
+#include "src/String_Builder.hpp"
 
 namespace now
 {
     struct Task;
     struct State;
-    typedef int Task_Type;
-    typedef int Code;
+    enum class Task_Type;
+    enum class Code;
 
     // Common  ----------------------------------------------------------------------------------------
     static void         init();
@@ -44,7 +44,7 @@ namespace now
     static const char* TASK_NAME = #TASK_NAME; \
     now::new_task( \
         now::get_state(), \
-        now::Task_Type_REGULAR,\
+        now::Task_Type::REGULAR,\
         #TASK_NAME, \
         {__VA_ARGS__} \
     )->action = [](const now::Task* task) -> void
@@ -52,7 +52,7 @@ namespace now
 #define FILETASK( FILE_NAME, ...) \
     now::new_task( \
         now::get_state(), \
-        now::Task_Type_FILE,\
+        now::Task_Type::FILE,\
         FILE_NAME, \
         {__VA_ARGS__} \
     )->action = [](const now::Task* task) -> void
@@ -67,27 +67,25 @@ namespace now
     static Code         invoke_tasks_sequentially(const State& state, const std::vector<Task*>& tasks);
 
 
-    enum Code_ {
-        Code_FAILED      = 0,
-        Code_OK,
-        Code_OK_SKIPPED
+    enum class Code {
+        FAILED = 0,
+        OK,
+        OK_SKIPPED
     };
 
-    enum Task_Type_ {
-        Task_Type_NULL = 0,
-        Task_Type_REGULAR = 1,
-        Task_Type_FILE = 2
+    enum class Task_Type {
+        NONE = 0,
+        REGULAR,
+        FILE
     };
 
     struct Task
     {
-
-
         using Action = void(*)(const Task*);
         static void null_action(const Task*) {}
 
         mutable bool        done = false;
-        Task_Type           type = Task_Type_NULL;
+        Task_Type           type = Task_Type::NONE;
         String              name = "";
         String              desc = "";
         Array<String>       deps;
@@ -114,7 +112,6 @@ namespace now
 }
 
 #ifdef NOW_IMPLEMENTATION
-
 
 int now::system(const String& command, const Array<String>& args, bool fatal)
 {
@@ -195,7 +192,7 @@ now::Code now::invoke_task(const State& state, const Task* task)
     if (task->done)
     {
         LOG_DEBUG("-- Skip task %s\n", task->name.cstr());
-        return Code_OK_SKIPPED;
+        return Code::OK_SKIPPED;
     }
 
     LOG_DEBUG("-- Invoke task %s\n", task->name.cstr());
@@ -211,11 +208,11 @@ now::Code now::invoke_task(const State& state, const Task* task)
                 continue;
                 
             LOG("-- ERR: Unable to find dependency '%s'\n", dep.cstr());
-            return Code_FAILED;
+            return Code::FAILED;
         }
-        else if( invoke_task(state, dep_task) == Code_FAILED )
+        else if( invoke_task(state, dep_task) == Code::FAILED )
         {
-            return Code_FAILED;
+            return Code::FAILED;
         }
     }
     
@@ -228,7 +225,7 @@ now::Code now::invoke_task(const State& state, const Task* task)
     task->done = true;
     LOG_DEBUG("-- Invoke task %s DONE\n", task->name.cstr());
 
-    return Code_OK;
+    return Code::OK;
 }
 
 void now::reset_state(State& state)
@@ -264,13 +261,13 @@ now::Code now::invoke_tasks_sequentially(const State& state, const std::vector<T
 {
     for (Task* task : tasks)
     {       
-        if ( now::invoke_task(state, task) == Code_FAILED)
+        if ( now::invoke_task(state, task) == Code::FAILED)
         {
-            return Code_FAILED;
+            return Code::FAILED;
         }
     }
 
-    return Code_OK;
+    return Code::OK;
 }
 
 int now::parse_args(int argc, char* argv[])
@@ -296,7 +293,7 @@ int now::parse_args(int argc, char* argv[])
             return 1;
         }
 
-        if( invoke_task(state, task) == Code_FAILED )
+        if( invoke_task(state, task) == Code::FAILED )
         {
             LOG("Failed to run '%s'\n", task->name.cstr() );
             return 1;
