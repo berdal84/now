@@ -66,10 +66,10 @@ namespace now
             data = nullptr;
         }
 
-        char operator[](size_t pos)
+        char operator[](size_t pos) const
         { assert(pos < size && "out of bounds"); return data[pos]; }
 
-        size_t rfind(char c)
+        size_t rfind(char c) const
         {
             size_t cursor = size-1;
             while ( cursor != npos && data[cursor] != c)
@@ -80,13 +80,13 @@ namespace now
             return cursor;
         }
 
-        String lsplit(size_t index)
+        String lsplit(size_t index) const
         {
             assert(index < size && "Out of bounds");
             return String{ index, data };
         }
 
-        String rsplit(size_t index)
+        String rsplit(size_t index) const
         {
             assert(index < size && "Out of bounds");
             return String{ size - index, data + index };
@@ -100,7 +100,7 @@ namespace now
             return rsplit(last_slash+1);
         }
 
-        String stem()
+        String stem() const
         {
             size_t index = rfind('.');
             if( index == npos )
