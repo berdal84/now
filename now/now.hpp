@@ -384,14 +384,14 @@ namespace now
 
                 // Parse dependencies
                 char *deps_str = colon_ptr + 1;
-                char *token    = strtok(deps_str, " \t\n");
+                char *token    = strtok(deps_str, " \t\n\\");
                 
                 while (token != nullptr)
                 {
                     String dep = String::copy(token);
                     result.files.append( dep );
                     LOG_DEBUG("Dependency #%i found: %s\n", result.files.size, dep.cstr() );
-                    token = strtok(NULL, " \t\n");
+                    token = strtok(NULL, " \t\n\\");
                 }
             }
         }
