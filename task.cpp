@@ -2,18 +2,17 @@
 #define BINARY       "app.exe"
 #define BUILD_DIR    "build"
 #define COMPILER     "clang++"
-#define CXXFLAGS     "--std=c++20 -Wno-braced-scalar-init -Wno-braced-scalar-init -D_CRT_SECURE_NO_WARNINGS" // warning: braces around scalar initializer [-Wbraced-scalar-init]
+#define CXXFLAGS     "--std=c++20 -Wno-braced-scalar-init -Wno-braced-scalar-init -DNOW_DEBUG -D_CRT_SECURE_NO_WARNINGS" // warning: braces around scalar initializer [-Wbraced-scalar-init]
 #define NOW_IMPLEMENTATION
 #define NOW_DEBUG_MEMORY
 #define NOW_VERBOSE
 #define NOW_ENABLE_TESTS
 #include "now/now.hpp"
-#include <format>
 
 int main(int argc, char** argv)
 {
     // do not put code before this line, it should always be able to rebuild itself
-    now::rebuild_it_self_if_needed("task.exe", "task.cpp");
+    now::rebuild_it_self_if_needed("task", "task.cpp");
 
     FILETASK( BUILD_DIR "/main.o", "main.cpp")
     {
