@@ -1,8 +1,6 @@
 build
 *.exe
-*.exe.old
 *.ilk
 *.pdb
-*.pdb.old
 *.d
-task
+*.old
