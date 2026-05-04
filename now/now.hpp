@@ -19,6 +19,7 @@ namespace now
 
     // Common  ----------------------------------------------------------------------------------------
     static void         init();
+    static int          run(const String& binary, const Array<String>& args= {}, bool fatal = true);
     static int          system(const String& command, const Array<String>& args= {}, bool fatal = true);
     static int          parse_args(int argc, char* argv[]);
 
@@ -37,6 +38,7 @@ namespace now
     static void         rename(const String& src, const String& dst);
     static int          mkdir_p(const String& path);
     static bool         exists(const String& path);
+    static String       normalize_binary_path(const String& binary);
 
     // Tasks --- --------------------------------------------------------------------------------------
 
@@ -112,6 +114,18 @@ namespace now
 }
 
 #ifdef NOW_IMPLEMENTATION
+
+now::String now::normalize_binary_path(const String& binary)
+{
+    assert(binary.size && "binary is empty!");
+    assert(binary[0] != '/' && "absolute path not handled yet");
+
+    #if __unix__ or __DARWIN__
+        return join({"./", binary.stem()}, "", temp_allocator() );
+    #else
+        return join({"./", binary.stem(), ".exe"}, "", temp_allocator() );
+    #endif
+}
 
 int now::system(const String& command, const Array<String>& args, bool fatal)
 {
@@ -384,14 +398,14 @@ namespace now
 
                 // Parse dependencies
                 char *deps_str = colon_ptr + 1;
-                char *token    = strtok(deps_str, " \t\n\\");
+                char *token    = strtok(deps_str, " \t\n");
                 
                 while (token != nullptr)
                 {
                     String dep = String::copy(token);
                     result.files.append( dep );
                     LOG_DEBUG("Dependency #%i found: %s\n", result.files.size, dep.cstr() );
-                    token = strtok(NULL, " \t\n\\");
+                    token = strtok(NULL, " \t\n");
                 }
             }
         }

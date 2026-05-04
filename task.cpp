@@ -1,5 +1,4 @@
 
-#define BINARY       "app.exe"
 #define BUILD_DIR    "build"
 #define COMPILER     "clang++"
 #define CXXFLAGS     "--std=c++20 -Wno-braced-scalar-init -Wno-braced-scalar-init -DNOW_DEBUG -D_CRT_SECURE_NO_WARNINGS" // warning: braces around scalar initializer [-Wbraced-scalar-init]
@@ -27,22 +26,24 @@ int main(int argc, char** argv)
         }
     };
 
+    static now::String binary = now::normalize_binary_path( BUILD_DIR "/app.exe" );
+
     static now::Array<now::String> objects = {
         BUILD_DIR "/main.o"
     };
     
-    FILETASK(BINARY, objects )
+    FILETASK(binary, objects )
     {
-        now::link( BINARY, objects);
+        now::link( binary, objects);
     };
 
-    TASK(build, { BINARY })
+    TASK(build, { binary })
     {
     };
 
     TASK(run, {build})
     {
-        now::system("./" BINARY);
+        now::system(binary);
     };
 
     TASK(clean)
@@ -52,7 +53,7 @@ int main(int argc, char** argv)
 
     TASK(clobber, {clean})
     {
-        now::system("rm " BINARY);
+        now::remove(binary);
     };
 
     TASK(rebuild, {clean, build})
