@@ -1,12 +1,14 @@
 #pragma once
 
+#ifdef NOW_IMPLEMENTATION
 #include <cstdarg>
 #include <cstdio>
+#endif // NOW_IMPLEMENTATION
 
-#define LOG(FMT, ...) now::log_message(FMT, __VA_ARGS__ )
+#define LOG(FMT, ...) now::log_message(FMT, ##__VA_ARGS__ )
 
 #ifdef NOW_VERBOSE
-#   define LOG_DEBUG(FMT, ...) now::log_message("[debug] " FMT, __VA_ARGS__ )
+#   define LOG_DEBUG(FMT, ...) now::log_message("[debug] " FMT, ##__VA_ARGS__ )
 #else
 #   define LOG_DEBUG(FMT, ...)
 #endif

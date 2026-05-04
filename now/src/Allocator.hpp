@@ -1,6 +1,8 @@
 #pragma once
 #include <cstdlib>
-#include <assert.h>
+#include <cassert>
+#include <cstring> // for memset
+#include <algorithm> // for std::find_if
 #include "Logging.hpp"
 
 namespace now
@@ -10,7 +12,27 @@ namespace now
     static Allocator* heap_allocator();
     static Allocator* null_allocator();
     static Allocator* default_allocator();
-    struct Allocation_Tracker;
+    
+    #ifdef NOW_DEBUG_MEMORY
+    struct Allocation_Tracker
+    {
+        struct Allocation
+        {
+            void*  ptr  = nullptr;
+            size_t size = 0;
+        };
+
+        const char* name = "default";
+        std::vector<Allocation> allocations; // TODO: use a performant container when it will get too slow (unordered set, or something non std)
+
+        Allocation_Tracker(const char* _name);
+
+        void                after_allocate(void* ptr, size_t size);
+        const Allocation*   find_allocation(void* ptr) const;
+        void                after_reallocate(void* old_ptr, void* new_ptr, size_t new_size );
+        void                register_before_release(void* ptr);
+    };
+    #endif
 
     struct Allocator
     {
@@ -148,27 +170,6 @@ namespace now
             return ptr;
         }
     };
-
-    #ifdef NOW_DEBUG_MEMORY
-    struct Allocation_Tracker
-    {
-        struct Allocation
-        {
-            void*  ptr  = nullptr;
-            size_t size = 0;
-        };
-
-        const char* name = "default";
-        std::vector<Allocation> allocations; // TODO: use a performant container when it will get too slow (unordered set, or something non std)
-
-        Allocation_Tracker(const char* _name);
-
-        void                after_allocate(void* ptr, size_t size);
-        const Allocation*   find_allocation(void* ptr) const;
-        void                after_reallocate(void* old_ptr, void* new_ptr, size_t new_size );
-        void                register_before_release(void* ptr);
-    };
-#endif
 }
 
 #ifdef NOW_IMPLEMENTATION

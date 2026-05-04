@@ -139,9 +139,9 @@ void now::rename(const String& src, const String& dst)
 int now::mkdir_p(const String& path)
 {
 #if __unix__ or __DARWIN__
-    return now::system( "mkdir", { "-p", path.c_str()} );
+    return now::system( "mkdir", Array<String>{ "-p", path } );
 #else
-    return now::system( "mkdir", Array{ path } );
+    return now::system( "mkdir", Array<String>{ path } );
 #endif
 }
 

@@ -108,7 +108,7 @@ namespace now
             return lsplit(index);
         }
 
-        char* cstr() const // TODO: RingBuffer should be generic (usr virtuals or delegates)
+        const char* cstr() const
         {
             return data;
         }

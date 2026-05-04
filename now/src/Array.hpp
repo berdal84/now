@@ -1,5 +1,11 @@
 #pragma once
 
+#include "Allocator.hpp"
+#include <cassert>
+#include <cstddef>
+#include <cstring>
+#include <initializer_list>
+
 namespace now
 {
     template<typename T>
@@ -86,7 +92,7 @@ namespace now
                     assert(data!=nullptr);
                     size = new_size;
 
-                    std::memcpy((void*)data, old_data, old_size);
+                    memcpy((void*)data, old_data, old_size);
                     
                     for( size_t i=old_size; i < new_size; i++)
                         new (&at(i)) T(); // construct in-place
