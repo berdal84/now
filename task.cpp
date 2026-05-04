@@ -21,7 +21,7 @@ int main(int argc, char** argv)
             now::mkdir_p( BUILD_DIR );
         }
 
-        for(size_t i; i < task->deps.size; ++i)
+        for(size_t i = 0; i < task->deps.size; ++i)
         {
             now::compile_object( task->deps.at(i) );
         }
