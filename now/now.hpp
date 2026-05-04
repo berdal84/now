@@ -398,14 +398,20 @@ namespace now
 
                 // Parse dependencies
                 char *deps_str = colon_ptr + 1;
-                char *token    = strtok(deps_str, " \t\n");
+                #if __unix__
+                    const char* split_with = " \t\n\\";
+                #else
+                    const char* split_with = " \t\n";
+                #endif
+
+                char *token    = strtok(deps_str, split_with);
                 
                 while (token != nullptr)
                 {
                     String dep = String::copy(token);
                     result.files.append( dep );
                     LOG_DEBUG("Dependency #%i found: %s\n", result.files.size, dep.cstr() );
-                    token = strtok(NULL, " \t\n");
+                    token = strtok(NULL, split_with);
                 }
             }
         }
@@ -439,7 +445,10 @@ void now::rebuild_it_self_if_needed(String binary, String source)
     {
         // Rename current binary (we can't overwrite it while running, but we can rename it)
         now::rename(binary, join({binary, ".old"}, temp_allocator() ).cstr() );
-         now::rename("task.pdb", "task.pdb.old");
+        
+        #if WIN32
+        now::rename("task.pdb", "task.pdb.old");
+        #endif
 
         // Compiles
         Array<String> args = {
